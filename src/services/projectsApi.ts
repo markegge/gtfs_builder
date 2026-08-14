@@ -249,9 +249,35 @@ async function gzipString(input: string): Promise<Blob> {
   return new Response(stream).blob();
 }
 
-export async function fetchWorkingState(
-  projectId: string,
-): Promise<{ snapshot: Record<string, unknown> | null; version: number }> {
+/**
+ * Why the server had no working state to hand back. The two cases used to be
+ * indistinguishable — both a bare 404 — which meant genuine data loss was
+ * invisible, reported to the user as "that feed has no routes yet" and counted
+ * in telemetry as a boring empty feed.
+ *
+ *   never_saved  — `working_state_r2_key IS NULL`. Normal for a fresh feed.
+ *   blob_missing — the key is recorded but the R2 object is gone. Data loss.
+ */
+export type WorkingStateAbsence = 'never_saved' | 'blob_missing';
+
+export interface WorkingStateResult {
+  snapshot: Record<string, unknown> | null;
+  version: number;
+  /** Set only when the server returned no working state. */
+  absent?: WorkingStateAbsence;
+  /**
+   * Total saved versions on this feed. Always populated by the server (header
+   * on 200, body field on 404); `undefined` only against an older worker.
+   */
+  snapshotCount?: number;
+}
+
+function parseCount(raw: unknown): number | undefined {
+  const n = typeof raw === 'string' ? parseInt(raw, 10) : typeof raw === 'number' ? raw : NaN;
+  return Number.isFinite(n) ? n : undefined;
+}
+
+export async function fetchWorkingState(projectId: string): Promise<WorkingStateResult> {
   let res: Response;
   try {
     res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/working-state`, {
@@ -264,9 +290,27 @@ export async function fetchWorkingState(
   }
 
   if (res.status === 404) {
-    // "No working state yet" — treat as empty; need current version via getProject.
+    // No working state — but WHICH 404? The body carries `reason` and
+    // `snapshotCount`; fall back to getProject for the version (and for an
+    // older worker that sends neither).
+    let reason: WorkingStateAbsence | undefined;
+    let snapshotCount: number | undefined;
+    try {
+      const body = (await res.json()) as { reason?: string; snapshotCount?: number };
+      if (body?.reason === 'blob_missing' || body?.reason === 'never_saved') reason = body.reason;
+      snapshotCount = parseCount(body?.snapshotCount);
+    } catch {
+      // Non-JSON 404 — fall through to the getProject path below.
+    }
     const detail = await getProject(projectId);
-    return { snapshot: null, version: detail.workingStateVersion };
+    return {
+      snapshot: null,
+      version: detail.workingStateVersion,
+      // An unlabelled 404 from an older worker still tells us which case it is:
+      // a recorded key with no blob is exactly `blob_missing`.
+      absent: reason ?? (detail.workingStateVersion > 0 ? 'blob_missing' : 'never_saved'),
+      snapshotCount: snapshotCount ?? parseCount(detail.snapshotCount) ?? detail.snapshots?.length,
+    };
   }
   if (!res.ok) throw await parseErrorResponse(res);
 
@@ -274,7 +318,11 @@ export async function fetchWorkingState(
   const version = versionHeader ? parseInt(versionHeader, 10) : 0;
   const text = await res.text();
   const snapshot = text ? (JSON.parse(text) as Record<string, unknown>) : null;
-  return { snapshot, version: Number.isFinite(version) ? version : 0 };
+  return {
+    snapshot,
+    version: Number.isFinite(version) ? version : 0,
+    snapshotCount: parseCount(res.headers.get('X-Snapshot-Count')),
+  };
 }
 
 export async function saveWorkingState(
@@ -315,7 +363,7 @@ export async function saveSnapshot(
     validationWarnings: number;
     snapshot: Record<string, unknown>;
   },
-): Promise<{ snapshot: ProjectSnapshot }> {
+): Promise<{ snapshot: ProjectSnapshot; workingStateVersion?: number }> {
   const gz = await gzipString(JSON.stringify(input.snapshot));
   const file = new File([gz], 'state.json.gz', { type: 'application/json' });
   const meta = {
@@ -341,7 +389,10 @@ export async function saveSnapshot(
     throw new ApiError('network_error', (e as Error)?.message ?? 'Network error', 0);
   }
   if (!res.ok) throw await parseErrorResponse(res);
-  return (await res.json()) as { snapshot: ProjectSnapshot };
+  // `workingStateVersion` is present only when the server had to seed the
+  // working state itself (a feed that had never been saved) — see the backstop
+  // in the snapshot route. Callers adopt it as their new If-Match token.
+  return (await res.json()) as { snapshot: ProjectSnapshot; workingStateVersion?: number };
 }
 
 export function listSnapshots(projectId: string): Promise<{ snapshots: ProjectSnapshot[] }> {

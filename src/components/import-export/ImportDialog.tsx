@@ -5,6 +5,7 @@ import type { Route } from '../../types/gtfs';
 import { CatalogSearch, type CatalogFeed } from './CatalogSearch';
 import { MyFeedsSource } from './MyFeedsSource';
 import { resolveMyFeedImportData, type MyFeedItem } from '../../services/myFeedsImport';
+import type { WorkingStateAbsence } from '../../services/projectsApi';
 import { feedNeedsShapes } from '../../services/shapesFromStops';
 import { detectRtapFeed } from '../../services/rtapDetect';
 import { parseMdbSourceId } from '../../services/mdbSourceId';
@@ -327,11 +328,22 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
   const handleMyFeedSelect = useCallback(async (feed: MyFeedItem) => {
     setError(null);
     let data: ImportData;
+    let absent: WorkingStateAbsence | undefined;
     try {
-      data = await resolveMyFeedImportData(feed.id);
+      ({ data, absent } = await resolveMyFeedImportData(feed.id));
     } catch (e) {
       trackFeedImportFailed('myfeeds', 'fetch');
       throw e;
+    }
+    // Data loss, not an empty feed. The server has a working-state key on file
+    // for this project but the blob is gone. Both cases used to arrive here as
+    // an indistinguishable 404 and both told the user the reassuring "no routes
+    // to import yet" — so a lost blob would never have been reported.
+    if (absent === 'blob_missing') {
+      trackFeedImportFailed('myfeeds', 'missing');
+      throw new Error(
+        "We couldn't load that feed's saved data — it may need to be restored from a saved version. Please contact support if this persists.",
+      );
     }
     if (data.routes.length === 0) {
       trackFeedImportFailed('myfeeds', 'empty');

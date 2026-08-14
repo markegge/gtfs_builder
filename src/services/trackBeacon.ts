@@ -179,6 +179,13 @@ export type ImportFailureStage =
   | 'fetch'           // couldn't retrieve the bytes (network, 4xx/5xx, proxy)
   | 'parse'           // got bytes, but they weren't a usable GTFS zip
   | 'empty'           // parsed fine, but there was nothing to import
+  // The feed's stored data is GONE — the server has a working-state key on
+  // file but its R2 blob is missing. Split out of `empty` deliberately: the two
+  // were indistinguishable, so genuine data loss would have been filed under
+  // "user picked one of their own empty feeds" and never investigated. This
+  // label should have a count of zero forever; if it doesn't, something is
+  // eating blobs and the worker logs an error on the same branch.
+  | 'missing'
   | 'declined_large'; // user backed out at the large-feed confirmation gate
 
 /** State of the feed at the moment the Export dialog opened. */

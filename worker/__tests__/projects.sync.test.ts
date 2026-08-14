@@ -1,9 +1,10 @@
 // /api/projects/:id/working-state — optimistic-concurrency save/load round-trip.
 
-import { beforeEach, afterEach, describe, expect, it } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { makeClient } from './_client';
 import {
   applyMigrations,
+  env as testEnv,
   gzip,
   resetDb,
   seedUser,
@@ -38,6 +39,72 @@ describe('/api/projects/:id/working-state', () => {
     );
     const res = await client.get(`/api/projects/${proj.id}/working-state`);
     expect(res.status).toBe(404);
+    // The two 404s must be distinguishable. This one is the boring case.
+    const body = (await res.json()) as { reason?: string; snapshotCount?: number };
+    expect(body.reason).toBe('never_saved');
+    expect(body.snapshotCount).toBe(0);
+  });
+
+  // A recorded working_state_r2_key whose R2 object is gone is REAL DATA LOSS.
+  // It used to return the same bare 404 as "never saved", which meant the
+  // client reported it to the user as an ordinary empty feed and filed it in
+  // telemetry under the same label. Both halves of that are fixed here.
+  it('GET distinguishes a MISSING blob from a never-saved feed, and logs it', async () => {
+    const client = await loggedInClient('syncmissing@example.com');
+    const proj = await client.json<{ id: string }>(
+      await client.post('/api/projects', { name: 'Lost' }),
+    );
+    await client.put(`/api/projects/${proj.id}/working-state`, undefined, {
+      body: await gzip(JSON.stringify({ routes: [{ route_id: 'R1' }] })),
+      headers: { 'Content-Encoding': 'gzip', 'If-Match': '0', 'Content-Type': 'application/json' },
+    });
+    // Delete the blob out from under D1 — the exact shape of the loss.
+    await testEnv.FEEDS.delete(`projects/${proj.id}/working-state.json.gz`);
+
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await client.get(`/api/projects/${proj.id}/working-state`);
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as { reason?: string };
+      expect(body.reason).toBe('blob_missing');
+      // This branch should never fire in production; when it does we need to
+      // hear about it immediately, not find it in a quarterly sweep.
+      expect(errorLog).toHaveBeenCalled();
+      expect(String(errorLog.mock.calls[0][0])).toContain('[working-state]');
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('GET reports the saved-version count so the client can warn on a blank canvas', async () => {
+    const client = await loggedInClient('synccount@example.com');
+    const proj = await client.json<{ id: string }>(
+      await client.post('/api/projects', { name: 'Counted' }),
+    );
+    await client.put(`/api/projects/${proj.id}/working-state`, undefined, {
+      body: await gzip(JSON.stringify({ routes: [] })),
+      headers: { 'Content-Encoding': 'gzip', 'If-Match': '0', 'Content-Type': 'application/json' },
+    });
+
+    const before = await client.get(`/api/projects/${proj.id}/working-state`);
+    expect(before.headers.get('X-Snapshot-Count')).toBe('0');
+
+    const form = new FormData();
+    form.append(
+      'state',
+      new Blob([await gzip(JSON.stringify({ routes: [{ route_id: 'R1' }] }))]),
+      'state.json.gz',
+    );
+    form.append('meta', JSON.stringify({ summary: {}, validationErrors: 0, validationWarnings: 0 }));
+    await client.post(`/api/projects/${proj.id}/snapshots`, undefined, { body: form });
+
+    const after = await client.get(`/api/projects/${proj.id}/working-state`);
+    expect(after.headers.get('X-Snapshot-Count')).toBe('1');
+    // Same number on the detail route, which is what the 404 path reads.
+    const detail = await client.json<{ snapshotCount: number }>(
+      await client.get(`/api/projects/${proj.id}`),
+    );
+    expect(detail.snapshotCount).toBe(1);
   });
 
   it('PUT with If-Match: 0 succeeds and returns workingStateVersion: 1', async () => {

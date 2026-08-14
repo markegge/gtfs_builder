@@ -9,14 +9,11 @@ import {
   deleteSnapshot,
   listSnapshots,
   restoreSnapshot,
-  saveSnapshot,
   type ProjectSnapshot,
-  type SnapshotSummary,
 } from '../../services/projectsApi';
 import { ApiError } from '../../services/authApi';
-import { runValidation } from '../../services/validation';
-import { calculateSystemStats } from '../../services/costEstimation';
 import { loadProjectFromServer } from '../../db/serverPersistence';
+import { saveVersionWithWorkingState } from '../../services/versionSave';
 
 function formatDate(ms: number | null | undefined): string {
   if (!ms) return '—';
@@ -29,50 +26,19 @@ function formatDate(ms: number | null | undefined): string {
   });
 }
 
-function buildSummary(state: ReturnType<typeof useStore.getState>): SnapshotSummary {
-  const stats = calculateSystemStats(state);
-
-  const serviceDays = new Set<string>();
-  for (const cd of state.calendarDates) {
-    serviceDays.add(`${cd.service_id}:${cd.date}`);
-  }
-  for (const c of state.calendars) {
-    const active = [c.sunday, c.monday, c.tuesday, c.wednesday, c.thursday, c.friday, c.saturday].reduce<number>(
-      (sum, v) => sum + (v ? 1 : 0),
-      0,
-    );
-    serviceDays.add(`pattern:${c.service_id}:${active}`);
-  }
-
-  let feedStartDate: string | null = state.feedInfo?.feed_start_date ?? null;
-  let feedEndDate: string | null = state.feedInfo?.feed_end_date ?? null;
-  if (!feedStartDate || !feedEndDate) {
-    let min: string | null = null;
-    let max: string | null = null;
-    for (const c of state.calendars) {
-      if (c.start_date && (!min || c.start_date < min)) min = c.start_date;
-      if (c.end_date && (!max || c.end_date > max)) max = c.end_date;
-    }
-    feedStartDate = feedStartDate || min;
-    feedEndDate = feedEndDate || max;
-  }
-
-  return {
-    routeCount: state.routes.length,
-    stopCount: state.stops.length,
-    tripCount: state.trips.length,
-    serviceDayCount: serviceDays.size,
-    feedStartDate,
-    feedEndDate,
-    revenueHoursWeekly: Math.round(stats.totalRevenueHoursWeekly * 10) / 10,
-  };
-}
-
 export function SnapshotHistoryPanel() {
   const projectId = useStore((s) => s.activeServerProjectId);
   const snapshotList = useStore((s) => s.snapshotList);
   const setSnapshotList = useStore((s) => s.setSnapshotList);
   const setRestoredBanner = useStore((s) => s.setRestoredBanner);
+  const emptyWorkingState = useStore((s) => s.emptyWorkingState);
+  // Nothing a user would recognise as their feed. Paired with emptyWorkingState
+  // this is the "you're looking at the recoverable blank canvas" condition —
+  // saving a version here would capture the blank canvas AND (now that a
+  // version save writes the working state too) cement it over the live feed.
+  const storeIsEmpty = useStore(
+    (s) => s.routes.length === 0 && s.stops.length === 0 && s.trips.length === 0,
+  );
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,40 +74,28 @@ export function SnapshotHistoryPanel() {
     );
   }
 
+  // Saves the LIVE FEED first, then the version — see services/versionSave.ts
+  // for why that order is the fix and not an implementation detail.
   const handleSaveSnapshot = async (label: string) => {
     setBusy(true);
     setError(null);
     try {
-      const state = useStore.getState();
-      const messages = runValidation(state);
-      const errors = messages.filter((m) => m.severity === 'error').length;
-      const warnings = messages.filter((m) => m.severity === 'warning').length;
-      const summary = buildSummary(state);
-
-      // Build snapshot using same keys as serverPersistence
-      const DATA_KEYS = [
-        'agencies', 'calendars', 'calendarDates', 'routes', 'routeStops',
-        'stops', 'trips', 'stopTimes', 'shapes', 'feedInfo',
-        'fareAttributes', 'fareRules', 'flexZones',
-        'projectId', 'projectName',
-      ] as const;
-      const snapshot: Record<string, unknown> = {};
-      for (const key of DATA_KEYS) {
-        snapshot[key] = (state as unknown as Record<string, unknown>)[key];
+      const result = await saveVersionWithWorkingState(projectId, label);
+      if (!result.ok) {
+        // The working state hit an If-Match conflict, so no version was
+        // written. The ConflictDialog is already up; don't claim a save.
+        setError(
+          'This feed changed somewhere else, so nothing was saved. ' +
+            'Resolve the conflict above, then save the version again.',
+        );
+        return;
       }
-
-      await saveSnapshot(projectId, {
-        label: label.trim() || undefined,
-        summary,
-        validationErrors: errors,
-        validationWarnings: warnings,
-        snapshot,
-      });
       setShowSave(false);
       await refresh();
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Save failed';
-      setError(msg);
+      // Not just ApiError: versionSave throws a plain Error for "the feed saved
+      // but the version didn't", and that distinction is the whole point.
+      setError((err as Error)?.message || 'Save failed');
     } finally {
       setBusy(false);
     }
@@ -273,7 +227,20 @@ export function SnapshotHistoryPanel() {
         )}
       </div>
 
-      {showSave && <SaveSnapshotDialog onSave={handleSaveSnapshot} onCancel={() => setShowSave(false)} busy={busy} />}
+      {showSave && (
+        <SaveSnapshotDialog
+          onSave={handleSaveSnapshot}
+          onCancel={() => setShowSave(false)}
+          busy={busy}
+          // The dialog stays open on failure, so the failure has to be legible
+          // from inside it — the panel behind is covered by the modal.
+          error={error}
+          // A version save now writes the working state too. On the recoverable
+          // blank canvas that would capture nothing AND overwrite the live feed
+          // with nothing — so say so before they press Save.
+          emptyWarning={emptyWorkingState !== null && storeIsEmpty ? emptyWorkingState.snapshotCount : null}
+        />
+      )}
 
       {restoreTarget && (
         <ConfirmDialog
@@ -315,10 +282,15 @@ function SaveSnapshotDialog({
   onSave,
   onCancel,
   busy,
+  emptyWarning,
+  error,
 }: {
   onSave: (label: string) => void;
   onCancel: () => void;
   busy: boolean;
+  /** Version count to warn about when the editor is currently empty; null = quiet. */
+  emptyWarning: number | null;
+  error: string | null;
 }) {
   // Default the label to today's date+time so the field is never empty —
   // user can hit Save immediately for a date-stamped snapshot, or type
@@ -343,6 +315,20 @@ function SaveSnapshotDialog({
         </>
       }
     >
+      {emptyWarning !== null && (
+        <div className="mb-4 px-3 py-2 rounded-md bg-gold-light border border-amber-200 text-amber-700 text-xs">
+          This feed is currently <strong>empty</strong>, and saving also updates the live feed —
+          so this would store an empty snapshot over an empty feed.{' '}
+          {emptyWarning > 0 ? (
+            <>
+              Cancel and restore one of the {emptyWarning} saved version
+              {emptyWarning === 1 ? '' : 's'} below first if your work is in one of them.
+            </>
+          ) : (
+            <>Cancel if you expected this feed to have content.</>
+          )}
+        </div>
+      )}
       <FormField
         label="Label"
         value={label}
@@ -350,6 +336,11 @@ function SaveSnapshotDialog({
         placeholder="e.g. March 2026 service change"
         autoFocus
       />
+      {error && (
+        <div className="mt-4 px-3 py-2 rounded-md bg-red-50 border border-red-200 text-red-700 text-xs">
+          {error}
+        </div>
+      )}
     </Modal>
   );
 }

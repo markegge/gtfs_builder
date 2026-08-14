@@ -74,6 +74,31 @@ describe('toMyFeedItem', () => {
     const item = toMyFeedItem(project({ workingStateUpdatedAt: 9999, updatedAt: 2 }));
     expect(item.updatedAt).toBe(9999);
   });
+
+  // ~25% of a typical account's live feeds have nothing in them, and the server
+  // sorts never-saved feeds to the TOP (a null working_state_updated_at falls
+  // back to creation time). The entries most likely to be clicked first were
+  // exactly the ones guaranteed to fail — hence flagging them in the list.
+  describe('empty-feed flag', () => {
+    it("marks a never-saved feed 'empty' — the only case that is certain", () => {
+      // No blob at all, so the working-state fetch is guaranteed to 404.
+      expect(toMyFeedItem(project({ workingStateSize: null })).content).toBe('empty');
+    });
+
+    it("marks the canonical 248-byte shell only 'likely-empty', never 'empty'", () => {
+      // Size is a hint, not proof: gzip squashes repetitive route JSON hard
+      // enough that a real 12-route feed measured 212 B — BELOW the empty
+      // shell. Blocking on this heuristic would hide real feeds, so it must
+      // stay advisory. (Caught by the browser check, not by reasoning.)
+      expect(toMyFeedItem(project({ workingStateSize: 248 })).content).toBe('likely-empty');
+      expect(toMyFeedItem(project({ workingStateSize: 123 })).content).toBe('likely-empty');
+    });
+
+    it('leaves anything plausibly non-empty alone', () => {
+      expect(toMyFeedItem(project({ workingStateSize: 323 })).content).toBe('ok');
+      expect(toMyFeedItem(project({ workingStateSize: 598 })).content).toBe('ok');
+    });
+  });
 });
 
 describe('listMyFeeds', () => {
@@ -169,13 +194,15 @@ describe('resolveMyFeedImportData', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    const data = await resolveMyFeedImportData('p-draft');
+    const { data, absent } = await resolveMyFeedImportData('p-draft');
 
     // Hits the org-scoped working-state route (server enforces access).
     const calledUrl = String(fetchMock.mock.calls[0][0]);
     expect(calledUrl).toContain('/api/projects/p-draft/working-state');
     expect(data.routes.map((r) => r.route_id)).toEqual(['R1']);
     expect(data.stops).toHaveLength(1);
+    // A 200 means the blob was there — nothing to flag.
+    expect(absent).toBeUndefined();
   });
 
   it('does NOT mutate the editor store (the open project is untouched)', async () => {
@@ -185,11 +212,47 @@ describe('resolveMyFeedImportData', () => {
     const fetchMock = vi.fn(async () => workingStateResponse({ routes: [{ route_id: 'OTHER' }] }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const data = await resolveMyFeedImportData('p-other');
+    const { data } = await resolveMyFeedImportData('p-other');
 
     // We parsed the OTHER project's data into a transient structure...
     expect(data.routes.map((r) => r.route_id)).toEqual(['OTHER']);
     // ...but the currently-open project's routes are unchanged (no clobber).
     expect(useStore.getState().routes.map((r) => r.route_id)).toEqual(['CURRENT']);
+  });
+
+  // Both 404s used to collapse into `{ snapshot: null }`, so an R2 blob that had
+  // gone missing was indistinguishable from a brand-new feed — same telemetry
+  // label, same reassuring "no routes to import yet" message to the user.
+  describe('404 disambiguation', () => {
+    function notFound(body: unknown): Response {
+      return new Response(JSON.stringify(body), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    /** 404 on the working state, then the getProject follow-up. */
+    function stub404(reason: string, detail: Partial<ProjectSummary> = {}) {
+      let call = 0;
+      return vi.fn(async () => {
+        call += 1;
+        return call === 1
+          ? notFound({ error: 'not_found', reason, snapshotCount: 2 })
+          : jsonResponse(project({ workingStateVersion: 3, ...detail }));
+      });
+    }
+
+    it('reports a MISSING blob distinctly from a never-saved feed', async () => {
+      vi.stubGlobal('fetch', stub404('blob_missing'));
+      const { data, absent } = await resolveMyFeedImportData('p-lost');
+      expect(absent).toBe('blob_missing');
+      expect(data.routes).toEqual([]);
+    });
+
+    it('reports a never-saved feed as never_saved', async () => {
+      vi.stubGlobal('fetch', stub404('never_saved'));
+      const { absent } = await resolveMyFeedImportData('p-new');
+      expect(absent).toBe('never_saved');
+    });
   });
 });

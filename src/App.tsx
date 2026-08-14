@@ -11,6 +11,7 @@ import { loadingFeed } from './store/history';
 import { listProjects } from './services/projectsApi';
 import { ApiError } from './services/authApi';
 import { useStore } from './store';
+import type { EmptyWorkingStateWarning } from './store/feedsSlice';
 import { importGtfsZip, loadImportIntoStore } from './services/gtfsImport';
 import { NotFoundPage } from './components/misc/NotFoundPage';
 import { ConflictDialog } from './components/snapshots/ConflictDialog';
@@ -198,6 +199,10 @@ function ServerEditorRoute() {
   const setFeedsProjects = useStore((s) => s.setFeedsProjects);
   const restoredBanner = useStore((s) => s.restoredBanner);
   const setRestoredBanner = useStore((s) => s.setRestoredBanner);
+  // Set by loadProjectFromServer when this feed opened to a blank canvas that
+  // it should NOT have (saved versions exist, or the working-state blob is
+  // gone). A brand-new feed never sets it — see feedsSlice.
+  const emptyWorkingState = useStore((s) => s.emptyWorkingState);
 
   const [projectId, setProjectId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -260,7 +265,21 @@ function ServerEditorRoute() {
         // Keeps the funnel denominator honest: an editor session that opened a
         // saved cloud feed did get a feed in front of the user, so it must not
         // be counted alongside "opened the editor and saw nothing".
-        trackFeedOpened('saved_project');
+        //
+        // Except when it DIDN'T get a feed in front of them. Opening to a blank
+        // canvas that should have had content is a failure, and counting it as
+        // feed_opened is how 16 broken feeds stayed invisible in the funnel for
+        // three weeks. `saved_project:missing` is real data loss;
+        // `saved_project:empty` is content stranded in a version.
+        const emptied = useStore.getState().emptyWorkingState;
+        if (emptied) {
+          trackFeedImportFailed(
+            'saved_project',
+            emptied.reason === 'blob_missing' ? 'missing' : 'empty',
+          );
+        } else {
+          trackFeedOpened('saved_project');
+        }
         localUnsub = setupAutoSave();
       } catch (err) {
         if (cancelled) return;
@@ -314,6 +333,7 @@ function ServerEditorRoute() {
           {restoredBanner}
         </Banner>
       )}
+      {emptyWorkingState && <EmptyWorkingStateBanner warning={emptyWorkingState} />}
       <div className="flex-1 min-h-0">
         <AppShell />
       </div>
@@ -322,6 +342,57 @@ function ServerEditorRoute() {
           so there's no working-state version to conflict on. */}
       {projectId && !locked && <ConflictDialog projectId={projectId} />}
     </div>
+  );
+}
+
+/**
+ * The feed opened, and there is nothing on the canvas that should be there.
+ *
+ * Deliberately NOT dismissible: the whole failure mode is that this state was
+ * silent — the editor applied `{}`, showed a blank map, and fired
+ * feed_opened('saved_project') as if it had worked. The banner clears itself
+ * when the state stops being true (a version is restored, or the feed is saved
+ * with content), not when the user waves it away.
+ */
+function EmptyWorkingStateBanner({ warning }: { warning: EmptyWorkingStateWarning }) {
+  const setBottomPanelTab = useStore((s) => s.setBottomPanelTab);
+  const setBottomPanelOpen = useStore((s) => s.setBottomPanelOpen);
+  const { snapshotCount, reason } = warning;
+  const openVersions = () => {
+    setBottomPanelTab('snapshots');
+    setBottomPanelOpen(true);
+  };
+  return (
+    <Banner
+      variant={reason === 'blob_missing' ? 'alert' : 'warning'}
+      icon={reason === 'blob_missing' ? '⚠️' : '📄'}
+      actions={
+        snapshotCount > 0 ? (
+          <button
+            onClick={openVersions}
+            className="shrink-0 text-xs font-semibold px-3 py-1 rounded-md bg-white/70 hover:bg-white border border-current/20 whitespace-nowrap"
+          >
+            Open version history
+          </button>
+        ) : undefined
+      }
+    >
+      {reason === 'blob_missing' ? (
+        <>
+          <strong>This feed's saved data could not be loaded.</strong> The editor is showing an
+          empty feed — that is not your feed.{' '}
+          {snapshotCount > 0
+            ? `Restore one of the ${snapshotCount} saved version${snapshotCount === 1 ? '' : 's'} instead of editing here.`
+            : 'Please contact support before making any changes here.'}
+        </>
+      ) : (
+        <>
+          <strong>This feed's live state is empty</strong> — but it has {snapshotCount} saved
+          version{snapshotCount === 1 ? '' : 's'}. Your work is most likely in one of them;
+          restore it rather than starting over.
+        </>
+      )}
+    </Banner>
   );
 }
 

@@ -22,6 +22,26 @@ export interface DraftLinkEntry {
   createdAt: number;
 }
 
+/**
+ * The "opened to a blank canvas, but the content is somewhere" state.
+ *
+ * Set by loadProjectFromServer when a server feed's live working state resolves
+ * to nothing AND that is alarming — i.e. saved versions exist to recover from,
+ * or the working-state blob is outright missing. A brand-new feed with nothing
+ * saved yet is the normal case and deliberately does NOT set this.
+ */
+export interface EmptyWorkingStateWarning {
+  /** How many saved versions the feed has (may be 0 when reason is blob_missing). */
+  snapshotCount: number;
+  /**
+   * no_content   — a working state exists (or was never saved) and it carries
+   *                no routes/stops/trips, while versions hold real content.
+   * blob_missing — the server has a working-state key on file but its R2 object
+   *                is gone. Real data loss; should never happen.
+   */
+  reason: 'no_content' | 'blob_missing';
+}
+
 export interface FeedsSlice {
   feedsProjects: ProjectSummary[];
   feedsQuotaWarning: string | null;
@@ -30,6 +50,7 @@ export interface FeedsSlice {
   workingStateVersion: number;
   snapshotList: ProjectSnapshot[];
   restoredBanner: string | null;
+  emptyWorkingState: EmptyWorkingStateWarning | null;
   publicationHistory: PublicationEntry[];
   currentPublication: PublicationCurrent | null;
   draftLinks: DraftLinkEntry[];
@@ -40,6 +61,7 @@ export interface FeedsSlice {
   setWorkingStateVersion: (version: number) => void;
   setSnapshotList: (snapshots: ProjectSnapshot[]) => void;
   setRestoredBanner: (msg: string | null) => void;
+  setEmptyWorkingState: (warning: EmptyWorkingStateWarning | null) => void;
   setPublicationHistory: (history: PublicationEntry[]) => void;
   setCurrentPublication: (current: PublicationCurrent | null) => void;
   setDraftLinks: (links: DraftLinkEntry[]) => void;
@@ -58,6 +80,7 @@ export const createFeedsSlice: StateCreator<
   workingStateVersion: 0,
   snapshotList: [],
   restoredBanner: null,
+  emptyWorkingState: null,
   publicationHistory: [],
   currentPublication: null,
   draftLinks: [],
@@ -87,6 +110,8 @@ export const createFeedsSlice: StateCreator<
       if (projectId === null) {
         state.workingStateVersion = 0;
         state.snapshotList = [];
+        // Feed-scoped warning — must not follow the user to the next feed.
+        state.emptyWorkingState = null;
         state.publicationHistory = [];
         state.currentPublication = null;
         state.draftLinks = [];
@@ -106,6 +131,11 @@ export const createFeedsSlice: StateCreator<
   setRestoredBanner: (msg) =>
     set((state) => {
       state.restoredBanner = msg;
+    }),
+
+  setEmptyWorkingState: (warning) =>
+    set((state) => {
+      state.emptyWorkingState = warning;
     }),
 
   setPublicationHistory: (history) =>

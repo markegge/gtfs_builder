@@ -393,8 +393,19 @@ export async function wipeLocalProject(projectId: string): Promise<void> {
   }
 }
 
+/**
+ * Does the live store hold anything a user would recognise as their feed?
+ * Deliberately routes/stops/trips only: agencies and featureSettings are
+ * present in the canonical 248-byte "empty shell" blob, so counting them would
+ * make every empty feed look populated.
+ */
+function storeHasFeedContent(): boolean {
+  const st = useStore.getState();
+  return st.routes.length > 0 || st.stops.length > 0 || st.trips.length > 0;
+}
+
 export async function loadProjectFromServer(projectId: string): Promise<void> {
-  const { snapshot, version } = await fetchWorkingState(projectId);
+  const { snapshot, version, absent, snapshotCount } = await fetchWorkingState(projectId);
   setCurrentWorkingStateVersion(projectId, version);
   const snap = snapshot ?? {};
   // Apply the flat top-level feed (the baseline), or an empty object for
@@ -434,15 +445,41 @@ export async function loadProjectFromServer(projectId: string): Promise<void> {
     useStore.getState().markSaved();
     if (repaired) useStore.getState().markDirty();
   }
+
+  // Never open a feed to a SILENT blank canvas.
+  //
+  // `snapshot ?? {}` above happily applies nothing at all, which is correct for
+  // a brand-new feed and alarming for anything else. Two cases are alarming:
+  //   - the feed has saved versions but its live state carries no feed content
+  //     (16 prod feeds were in exactly this state — "Save a version" wrote the
+  //     version and left the working state behind);
+  //   - the working-state blob the server has on file has gone missing.
+  // Everything else — a feed nobody has saved yet — stays quiet.
+  const versions = snapshotCount ?? 0;
+  const emptyAndRecoverable = !storeHasFeedContent() && (versions > 0 || absent === 'blob_missing');
+  useStore.getState().setEmptyWorkingState(
+    emptyAndRecoverable
+      ? { snapshotCount: versions, reason: absent === 'blob_missing' ? 'blob_missing' : 'no_content' }
+      : null,
+  );
 }
+
+/**
+ * What a save attempt actually did. `saveProjectNow` resolves rather than
+ * throwing on an If-Match conflict (the ConflictDialog owns that flow), which
+ * means "it returned" is NOT the same as "the server has your work" — a caller
+ * that chains another durable write onto a save has to be able to tell the
+ * difference, or it reproduces the very bug this contract exists to prevent.
+ */
+export type SaveOutcome = 'saved' | 'conflict';
 
 /**
  * One-shot save of the current store state to the server. Throws on network
  * failure or unexpected error; on If-Match conflict, dispatches the
  * `gb:working-state-conflict` event (so the existing ConflictDialog handles
- * resolution) and resolves without throwing.
+ * resolution) and resolves with 'conflict' — NOT 'saved'.
  */
-export async function saveProjectNow(projectId: string): Promise<void> {
+export async function saveProjectNow(projectId: string): Promise<SaveOutcome> {
   // #66 redesign: persist the BASELINE feed at top level plus the variant layer
   // (as diffs) in the envelope — never the active experiment into the feed slot.
   // (Supersedes the stopgap's snapshotOverride Save gate: Save is now always
@@ -453,6 +490,10 @@ export async function saveProjectNow(projectId: string): Promise<void> {
     const { workingStateVersion } = await saveWorkingState(projectId, snapshot, ifMatch);
     setCurrentWorkingStateVersion(projectId, workingStateVersion);
     useStore.getState().markSaved();
+    // The live feed now matches what's in front of the user, so a stale
+    // "this feed's live state is empty" warning must go.
+    useStore.getState().setEmptyWorkingState(null);
+    return 'saved';
   } catch (err) {
     if (err instanceof ConflictError) {
       window.dispatchEvent(
@@ -460,7 +501,7 @@ export async function saveProjectNow(projectId: string): Promise<void> {
           detail: { projectId, currentVersion: err.currentVersion },
         }),
       );
-      return;
+      return 'conflict';
     }
     throw err;
   }
