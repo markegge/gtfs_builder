@@ -6,6 +6,7 @@ import { CatalogSearch, type CatalogFeed } from './CatalogSearch';
 import { MyFeedsSource } from './MyFeedsSource';
 import { resolveMyFeedImportData, type MyFeedItem } from '../../services/myFeedsImport';
 import type { WorkingStateAbsence } from '../../services/projectsApi';
+import { persistImportedFeed } from '../../services/importPersist';
 import { feedNeedsShapes } from '../../services/shapesFromStops';
 import { detectRtapFeed } from '../../services/rtapDetect';
 import { parseMdbSourceId } from '../../services/mdbSourceId';
@@ -137,6 +138,13 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
   const [completing, setCompleting] = useState(false);
   const [completeError, setCompleteError] = useState<string | null>(null);
 
+  // Persisting a replace-import to a server-backed feed. `persistError` being
+  // set means the feed is in the editor but NOT on the server — the store is
+  // deliberately left dirty in that case, so the success screen has to say so
+  // rather than showing an unqualified tick.
+  const [persisting, setPersisting] = useState(false);
+  const [persistError, setPersistError] = useState<string | null>(null);
+
   const handleComplete = useCallback(async () => {
     if (!onComplete) {
       onClose();
@@ -155,8 +163,26 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
   /** Wholesale replace the current project with the imported feed. Matches
    * the first-time-import flow: clear all existing state, load the new feed,
    * rename the project, pan/zoom the map to the new routes, and surface the
-   * success screen. */
-  const doReplaceImport = useCallback((data: ImportData, name: string, mdbSourceId: number | null = null, origin: FeedOrigin = 'upload') => {
+   * success screen.
+   *
+   * On a SERVER-BACKED feed this also persists the result to the server, and
+   * that is not a nicety — it is the root cause of the stranded-feed bug.
+   *
+   * This used to end in a bare `markSaved()` ("an import is a load, not an
+   * edit"), which is true for an anonymous draft — IndexedDB autosave has it —
+   * and false for a cloud feed, where `setupAutoSave` returns early and NOTHING
+   * had reached the server. The editor then showed "Saved" with the Save button
+   * DISABLED (TopBar gates it on `!isDirty && activeServerProjectId`) over a
+   * server that still held the 248-byte empty shell, and `beforeunload` stayed
+   * silent because the store was clean. The user was told their work was saved
+   * and had the control they'd have used to save it taken away — which is how
+   * 18 feeds ended up with their content only in a later "Save a version".
+   *
+   * So: persist first, and only claim clean when the PUT returns. If it doesn't
+   * (conflict, network, quota, 4xx) the store stays dirty — Save re-enables,
+   * the unload guard re-arms, and the success screen says so out loud. Never
+   * clean without a durable write. */
+  const doReplaceImport = useCallback(async (data: ImportData, name: string, mdbSourceId: number | null = null, origin: FeedOrigin = 'upload') => {
     loadImportIntoStore(data);
     useStore.getState().setProjectName(name);
     // Stamp Mobility Database import provenance AFTER loadImportIntoStore, which
@@ -167,10 +193,7 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
     // auto-import can't read a stale importMdbSourceId from state.
     if (mdbSourceId != null) useStore.getState().setMdbSourceId(mdbSourceId);
     fitMapToImport(data);
-    // Treat the import as a load, not an edit — clear dirty so the
-    // beforeunload prompt only fires once the user actually modifies the
-    // freshly imported feed.
-    useStore.getState().markSaved();
+
     // A feed is now in front of the user — the first-run funnel's "they got
     // something loaded" signal. Origin only; no file name, URL, or contents.
     trackFeedOpened(origin);
@@ -179,7 +202,26 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
       stops: data.stops.length,
       trips: data.trips.length,
     });
-  }, []);
+
+    setPersistError(null);
+    setPersisting(true);
+    try {
+      // `onComplete` means the dialog is in create-a-new-feed mode (MyFeedsPage /
+      // OrgSettingsPage): the project doesn't exist yet and the caller does the
+      // create + first save itself, so there is nothing here to write to — and
+      // writing would push this feed into whichever project is still attached.
+      const result = await persistImportedFeed({ creatingNewFeed: !!onComplete });
+      if (result.kind === 'conflict') {
+        setPersistError(
+          'This feed changed somewhere else, so the import has not been saved.',
+        );
+      } else if (result.kind === 'failed') {
+        setPersistError(`Saving to your feed failed: ${result.message}.`);
+      }
+    } finally {
+      setPersisting(false);
+    }
+  }, [onComplete]);
 
   /** Hand a fully-resolved feed (from any source — zip parse or a "My feeds"
    * working-state fetch) to the import UI: surface warnings, then either
@@ -194,7 +236,7 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
    * it's provenance about THIS import action, not a property of the parsed
    * feed itself — it survives untouched whether we replace immediately or the
    * user lands on the mode-selection screen first. */
-  const presentImportData = useCallback((data: ImportData, name: string, sourceUrl: string | null = null, mdbSourceId: number | null = null, origin: FeedOrigin = 'upload') => {
+  const presentImportData = useCallback(async (data: ImportData, name: string, sourceUrl: string | null = null, mdbSourceId: number | null = null, origin: FeedOrigin = 'upload') => {
     setImportWarnings(data.warnings);
     setImportSourceUrl(sourceUrl);
     setImportMdbSourceId(mdbSourceId);
@@ -207,7 +249,7 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
     // silently imported the entire source feed, and a blank workspace is
     // exactly when you're most likely to be cherry-picking into it.
     if (useStore.getState().routes.length === 0 && origin !== 'myfeeds') {
-      doReplaceImport(data, name, mdbSourceId, origin);
+      await doReplaceImport(data, name, mdbSourceId, origin);
       return;
     }
     setParsedData(data);
@@ -227,7 +269,7 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
         setProgress(rows ? `${phase} ${rows.toLocaleString()} rows` : phase),
       );
       const name = file.name.replace(/\.zip$/i, '');
-      presentImportData(data, name, sourceUrl, mdbSourceId, origin);
+      await presentImportData(data, name, sourceUrl, mdbSourceId, origin);
     } catch (e: unknown) {
       // We fetched (or were handed) bytes and they weren't a usable GTFS zip.
       // Only the stage is recorded — never the parser's message, which can
@@ -350,7 +392,7 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
       throw new Error('That feed has no routes to import yet.');
     }
     // No external URL for an internal project reference.
-    presentImportData(data, feed.name || feed.slug, null, null, 'myfeeds');
+    await presentImportData(data, feed.name || feed.slug, null, null, 'myfeeds');
   }, [presentImportData]);
 
   const handleUrlFetch = useCallback(async () => {
@@ -405,11 +447,11 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
     });
   };
 
-  const handleImport = () => {
+  const handleImport = async () => {
     if (!parsedData) return;
 
     if (mode === 'replace') {
-      doReplaceImport(parsedData, fileName, importMdbSourceId, importOrigin);
+      await doReplaceImport(parsedData, fileName, importMdbSourceId, importOrigin);
     } else {
       if (selectedRouteIds.size === 0) return;
       mergeImportIntoStore(parsedData, selectedRouteIds);
@@ -480,7 +522,7 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
 
     return (
       <>
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={completing ? undefined : onClose}>
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={completing || persisting ? undefined : onClose}>
           <div className="bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 bg-teal-light rounded-lg flex items-center justify-center text-xl">✓</div>
@@ -488,6 +530,21 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
                 {mode === 'merge' ? 'Routes Added' : 'Import Successful'}
               </h3>
             </div>
+            {persisting && (
+              <div className="bg-cream border border-sand rounded-lg px-3 py-2 mb-4 text-sm text-warm-gray">
+                Saving to your feed…
+              </div>
+            )}
+            {/* The feed IS in the editor but did NOT reach the server. The store
+                is left dirty on purpose, so Save is enabled and the unload guard
+                is armed — say that plainly instead of showing an unqualified
+                tick, which is the lie that stranded 18 feeds. */}
+            {persistError && (
+              <div className="bg-gold-light border border-amber-200 rounded-lg px-3 py-2 mb-4 text-sm text-amber-700">
+                <strong>Not saved to your feed yet.</strong> {persistError} Your changes are still
+                here in the editor — press <strong>Save</strong> in the toolbar.
+              </div>
+            )}
             {importWarnings.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4 text-xs text-amber-700">
                 {importWarnings.map((w, i) => <p key={i}>{w}</p>)}
@@ -558,10 +615,10 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
             )}
             <button
               onClick={handleComplete}
-              disabled={completing}
+              disabled={completing || persisting}
               className="w-full px-4 py-2.5 bg-coral text-white rounded-lg font-heading font-bold text-sm hover:bg-[#d4603a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {completing ? 'Saving…' : onComplete ? (completeLabel ?? 'Save feed') : 'Open in Editor'}
+              {completing || persisting ? 'Saving…' : onComplete ? (completeLabel ?? 'Save feed') : 'Open in Editor'}
             </button>
           </div>
         </div>
@@ -647,7 +704,7 @@ export function ImportDialog({ onClose, onComplete, completeLabel, initialSource
               onClick={() => {
                 if (!parsedData) return;
                 setMode('replace');
-                doReplaceImport(parsedData, fileName, importMdbSourceId, importOrigin);
+                void doReplaceImport(parsedData, fileName, importMdbSourceId, importOrigin);
               }}
               className="flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors bg-white text-warm-gray border-sand hover:border-coral hover:text-dark-brown"
             >

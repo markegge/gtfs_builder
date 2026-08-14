@@ -25,6 +25,26 @@ export interface ProjectSlice {
   mdbSourceId: number | null;
   setProjectName: (name: string) => void;
   markDirty: () => void;
+  /**
+   * Declare the editor clean: clears `isDirty` and stamps `lastSavedAt`.
+   *
+   * ⚠️ Only call this when the bytes are durable WHERE THE USER THINKS THEY
+   * ARE. `isDirty` is not a cosmetic flag — it drives the TopBar's Save button
+   * (disabled when clean on a server-backed feed) and the `beforeunload`
+   * guard. Clearing it early doesn't just mislabel the state, it removes the
+   * two controls the user would have used to rescue their work.
+   *
+   * For a SERVER-BACKED feed (`activeServerProjectId != null`) durable means
+   * the working-state PUT returned — nothing less. IndexedDB autosave is NOT
+   * durability for a cloud feed: `setupAutoSave` returns early for one, so
+   * there is no local copy either.
+   *
+   * This exact mistake put 18 production feeds into a state where the editor
+   * said "Saved", the Save button was disabled, and the server held an empty
+   * shell (ImportDialog's replace-import called markSaved() without writing to
+   * the server). If you are reaching for this after a load or an import, ask
+   * first: did anything reach the server? If not, leave the store dirty.
+   */
   markSaved: () => void;
   setProjectId: (id: string) => void;
   setLicenseSpdx: (value: string | null) => void;
