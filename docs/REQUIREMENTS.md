@@ -476,6 +476,7 @@ Cross-cutting embed features:
 - ✅ Today's-service banner ("Today is Friday · Weekday schedule in effect" / "No service today") computed in agency timezone.
 - ✅ Feed-expiry warning when within 14 days of `feed_end_date` (yellow) or already past (red).
 - ✅ Service-day tabs split by both day pattern AND date range — feeds with seasonal services (e.g., summer / fall / spring weekday variants) get separate tabs disambiguated by date.
+- ✅ Tab labels are named patterns where one exists — Weekday, Saturday, Sunday, **Weekend** (Sat+Sun), Daily — and an unbroken run of 3+ days collapses to a range (**`Mon–Sat`**). Days are listed Mon-first. A single-day service keeps its bare day name (`Fri`). Labels are derived from `calendar.txt` day flags only; the editor's UI-only `Calendar._description` (`src/types/gtfs.ts`) sometimes holds a nicer human name but is user-entered data on a different path and is deliberately not consulted. Labels never feed the profile id, so renaming a pattern cannot invalidate a pasted `?service=` id.
 - ✅ Per-org brand logo + per-project brand color applied via CSS custom properties.
 - ✅ Open Graph + Twitter card meta on every embed page.
 - ✅ Auto-generated route-map thumbnail (whole-system map, routes in `route_color`) via the Mapbox Static Images API, cached in R2 (migration 0016); used as the `og:image` on the mini-site and as the card image in the feeds list. A styled fallback (gray bus outline + GTFS·X wordmark) renders before the thumbnail exists.

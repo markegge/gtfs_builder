@@ -22,6 +22,15 @@
 
 const DAY_KEYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const;
 
+// Labels read Mon-first — the transit convention, and what lets Fri/Sat/Sun be
+// recognised as one run. (The flags array itself stays Sun-first to match
+// calendar.txt column order and, more importantly, the profile id's key format.)
+const MON_FIRST_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+/** Index into the Sun-first flags array for each Mon-first position. */
+const MON_FIRST_FLAG_INDEX = [1, 2, 3, 4, 5, 6, 0];
+/** Below this, a contiguous block reads better spelled out: "Mon Tue", not "Mon–Tue". */
+const MIN_RUN_FOR_RANGE = 3;
+
 /**
  * The calendar.txt fields these helpers read. Structural on purpose and looser
  * than either side's own model (`worker/embeds/types.ts:Calendar`,
@@ -102,6 +111,15 @@ export function buildServiceProfiles(calendars: ServiceCalendarRow[]): ServicePr
   }));
 
   // Order: Weekday → Saturday → Sunday → Daily → other (alphabetical).
+  //
+  // "Weekend" deliberately does NOT get a rank of its own, even though it reads
+  // like it belongs beside Saturday and Sunday. Profile order is the tie-break
+  // in pickDefaultProfile, so promoting Weekend above Daily changes which
+  // schedule a rider sees by default on any feed that models both an all-week
+  // service and a Sat+Sun one — a different trip set, not a different name. It
+  // is a real question which of those should win, but it's a product decision
+  // about ambiguous feed data, not a labelling one. Keep them ranked as the
+  // day-joined labels they replaced.
   const order = (label: string) => {
     if (label.startsWith('Weekday')) return 0;
     if (label.startsWith('Saturday')) return 1;
@@ -138,20 +156,40 @@ export function hashKey(s: string): string {
   return Math.abs(h).toString(36);
 }
 
+/**
+ * Name a day pattern the way a rider would say it. This string is the most
+ * visible text on an embed (it's the tab), and it's also what the snippet
+ * panel's service picker lists.
+ */
 export function labelForFlags(flags: number[]): string {
   // flags are [sun, mon, tue, wed, thu, fri, sat]
   const [sun, mon, tue, wed, thu, fri, sat] = flags;
   const weekdays = mon === 1 && tue === 1 && wed === 1 && thu === 1 && fri === 1;
+  const noWeekdays = mon === 0 && tue === 0 && wed === 0 && thu === 0 && fri === 0;
   if (weekdays && sat === 1 && sun === 1) return 'Daily';
   if (weekdays && sat === 0 && sun === 0) return 'Weekday';
-  if (sat === 1 && sun === 0 && mon === 0 && tue === 0 && wed === 0 && thu === 0 && fri === 0) {
-    return 'Saturday';
+  // Sat+Sun had no case and fell through to the day-join, so weekend service
+  // read as "Sun Sat" — 19 of 97 published feeds as of 2026-09.
+  if (sat === 1 && sun === 1 && noWeekdays) return 'Weekend';
+  if (sat === 1 && sun === 0 && noWeekdays) return 'Saturday';
+  if (sun === 1 && sat === 0 && noWeekdays) return 'Sunday';
+
+  // Anything else: compose from the active days, Mon-first.
+  const active: number[] = [];
+  for (let i = 0; i < MON_FIRST_FLAG_INDEX.length; i++) {
+    if (flags[MON_FIRST_FLAG_INDEX[i]] === 1) active.push(i);
   }
-  if (sun === 1 && sat === 0 && mon === 0 && tue === 0 && wed === 0 && thu === 0 && fri === 0) {
-    return 'Sunday';
+  if (active.length === 0) return 'No service';
+
+  // One unbroken block of 3+ days reads as a range — "Mon–Sat", not
+  // "Mon Tue Wed Thu Fri Sat". Deliberately NOT cyclic: Sat/Sun/Mon wraps the
+  // week end and "Sat–Mon" reads worse than spelling it out. A single day stays
+  // bare, because "Fri" is exactly right for a Friday-only service.
+  const first = active[0];
+  const last = active[active.length - 1];
+  const contiguous = last - first === active.length - 1;
+  if (contiguous && active.length >= MIN_RUN_FOR_RANGE) {
+    return `${MON_FIRST_NAMES[first]}–${MON_FIRST_NAMES[last]}`;
   }
-  // Compose a custom label from active day abbreviations.
-  const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const active = names.filter((_, i) => flags[i] === 1);
-  return active.length ? active.join(' ') : 'No service';
+  return active.map((i) => MON_FIRST_NAMES[i]).join(' ');
 }

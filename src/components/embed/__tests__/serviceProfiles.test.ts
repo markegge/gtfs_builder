@@ -35,6 +35,7 @@ function cal(service_id: string, flags: string, start_date = '20260101', end_dat
 const WEEKDAY = '0111110';
 const SATURDAY = '0000001';
 const SUNDAY = '1000000';
+const WEEKEND = '1000001';
 const DAILY = '1111111';
 
 describe('buildServiceProfiles', () => {
@@ -81,6 +82,7 @@ describe('buildServiceProfiles', () => {
     const profiles = buildServiceProfiles([
       cal('OTHER', '0101010'),
       cal('DAILY', DAILY),
+      cal('WKND', WEEKEND),
       cal('SUN', SUNDAY),
       cal('SAT', SATURDAY),
       cal('WKDY', WEEKDAY),
@@ -91,7 +93,16 @@ describe('buildServiceProfiles', () => {
       'Sunday',
       'Daily',
       'Mon Wed Fri',
+      'Weekend',
     ]);
+  });
+
+  it('keeps "Weekend" ranked where its day-joined label was, behind Daily', () => {
+    // Order is pickDefaultProfile's tie-break, so promoting Weekend would change
+    // which schedule a rider sees by default on a feed carrying both an all-week
+    // and a Sat+Sun service. Renaming a pattern must not move it.
+    const rows = [cal('DAILY', DAILY), cal('WKND', WEEKEND)];
+    expect(buildServiceProfiles(rows).map((p) => p.label)).toEqual(['Daily', 'Weekend']);
   });
 
   it('returns [] for a feed with no calendar.txt rows', () => {
@@ -149,17 +160,53 @@ describe('buildServiceProfiles', () => {
 });
 
 describe('labelForFlags', () => {
-  it('names the four canonical patterns', () => {
+  // flags are [sun, mon, tue, wed, thu, fri, sat].
+
+  it('names the canonical patterns', () => {
     expect(labelForFlags([0, 1, 1, 1, 1, 1, 0])).toBe('Weekday');
     expect(labelForFlags([0, 0, 0, 0, 0, 0, 1])).toBe('Saturday');
     expect(labelForFlags([1, 0, 0, 0, 0, 0, 0])).toBe('Sunday');
     expect(labelForFlags([1, 1, 1, 1, 1, 1, 1])).toBe('Daily');
   });
 
-  it('composes day abbreviations for anything else', () => {
+  it('names a Saturday+Sunday service "Weekend"', () => {
+    // The most common non-weekday pattern in the published corpus. It used to
+    // fall through to the day-join and render as "Sun Sat" — and this string is
+    // the most visible text on the embed.
+    expect(labelForFlags([1, 0, 0, 0, 0, 0, 1])).toBe('Weekend');
+  });
+
+  it('collapses a contiguous run of 3+ days into a range', () => {
+    expect(labelForFlags([0, 1, 1, 1, 1, 1, 1])).toBe('Mon–Sat'); // Mon..Sat
+    expect(labelForFlags([0, 0, 1, 1, 1, 1, 1])).toBe('Tue–Sat');
+    expect(labelForFlags([0, 0, 0, 1, 1, 1, 0])).toBe('Wed–Fri');
+  });
+
+  it('treats the week as Mon-first, so Fri/Sat/Sun is a run', () => {
+    // In Sun-first order these are indices 0, 5, 6 and look non-contiguous;
+    // Mon-first they are 4, 5, 6. Fri–Sun is a real late-night/event pattern.
+    expect(labelForFlags([1, 0, 0, 0, 0, 1, 1])).toBe('Fri–Sun');
+  });
+
+  it('spells out a two-day block rather than ranging it', () => {
+    expect(labelForFlags([0, 1, 1, 0, 0, 0, 0])).toBe('Mon Tue');
+    expect(labelForFlags([0, 0, 0, 0, 1, 1, 0])).toBe('Thu Fri');
+  });
+
+  it('keeps a single-day service as a bare day name', () => {
+    expect(labelForFlags([0, 0, 0, 0, 0, 1, 0])).toBe('Fri');
+    expect(labelForFlags([0, 1, 0, 0, 0, 0, 0])).toBe('Mon');
+  });
+
+  it('joins non-contiguous days, Mon-first', () => {
     expect(labelForFlags([0, 1, 0, 1, 0, 1, 0])).toBe('Mon Wed Fri');
-    expect(labelForFlags([1, 0, 0, 0, 0, 0, 1])).toBe('Sun Sat');
-    expect(labelForFlags([0, 1, 1, 1, 1, 1, 1])).toBe('Mon Tue Wed Thu Fri Sat');
+    expect(labelForFlags([1, 1, 1, 1, 1, 1, 0])).toBe('Mon Tue Wed Thu Fri Sun');
+  });
+
+  it('does not treat a run as wrapping around the end of the week', () => {
+    // Sat/Sun/Mon is cyclically contiguous but reads terribly as "Sat–Mon",
+    // so it stays spelled out.
+    expect(labelForFlags([1, 1, 0, 0, 0, 0, 1])).toBe('Mon Sat Sun');
   });
 
   it('labels an all-zero calendar "No service"', () => {

@@ -127,6 +127,33 @@ function makeWeekdaySaturdayState(): SnapshotState {
 const WEEKDAY_ONLY_TIME = '6:11a';
 const SATURDAY_ONLY_TIME = '1:47p';
 
+/**
+ * Day-pattern variant: a Sat+Sun service, a Mon-through-Sat run, and a
+ * Friday-only service — the three label shapes that decide what a rider reads
+ * on the tab and what the snippet panel shows in its dropdown.
+ */
+function makeDayPatternState(): SnapshotState {
+  const base = makeFeedState();
+  return {
+    ...base,
+    calendars: [
+      { service_id: 'WKND', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 0, saturday: 1, sunday: 1, start_date: '20260101', end_date: '20261231' },
+      { service_id: 'MONSAT', monday: 1, tuesday: 1, wednesday: 1, thursday: 1, friday: 1, saturday: 1, sunday: 0, start_date: '20260101', end_date: '20261231' },
+      { service_id: 'FRIONLY', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 1, saturday: 0, sunday: 0, start_date: '20260101', end_date: '20261231' },
+    ],
+    trips: [
+      { trip_id: 'p1', route_id: 'R1', service_id: 'WKND', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+      { trip_id: 'p2', route_id: 'R1', service_id: 'MONSAT', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+      { trip_id: 'p3', route_id: 'R1', service_id: 'FRIONLY', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+    ],
+    stopTimes: [
+      { trip_id: 'p1', arrival_time: '09:00:00', departure_time: '09:00:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'p2', arrival_time: '09:00:00', departure_time: '09:00:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'p3', arrival_time: '09:00:00', departure_time: '09:00:00', stop_id: 's1', stop_sequence: 1 },
+    ],
+  };
+}
+
 async function createPublishedProject(
   client: TestClient,
   name: string,
@@ -350,6 +377,34 @@ describe('embed routes', () => {
     expect(await cross.text()).toContain(
       profiles[1].label === 'Saturday' ? SATURDAY_ONLY_TIME : WEEKDAY_ONLY_TIME,
     );
+  });
+
+  it('labels service-day tabs by day pattern, not by joining day abbreviations', async () => {
+    const client = await loggedInClient('emb-svc-labels@example.com');
+    const { slug } = await createPublishedProject(client, 'EmbedSvcLabels', makeDayPatternState());
+
+    const res = await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // Asserted as tab text (`>Label</a>`) rather than a bare substring: "Fri"
+    // also appears inside the today-banner's "Friday" one day in seven.
+    expect(html).toContain('>Weekend</a>');
+    expect(html).toContain('>Mon–Sat</a>');
+    expect(html).toContain('>Fri</a>');
+    // The strings these replace, which is what riders see today.
+    expect(html).not.toContain('>Sun Sat</a>');
+    expect(html).not.toContain('>Mon Tue Wed Thu Fri Sat</a>');
+  });
+
+  it('publishes the same labels to the snippet panel’s dropdown', async () => {
+    const client = await loggedInClient('emb-svc-labels-api@example.com');
+    const { slug } = await createPublishedProject(client, 'EmbedSvcLabelsApi', makeDayPatternState());
+
+    // All three fall into "other" and sort alphabetically there — the
+    // pre-existing rule, deliberately unchanged by the relabelling.
+    const profiles = await serviceProfiles(slug);
+    expect(profiles.map((p) => p.label)).toEqual(['Fri', 'Mon–Sat', 'Weekend']);
   });
 
   it('GET /widgets.js serves the web-component loader (origin-level, no slug)', async () => {
