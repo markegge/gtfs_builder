@@ -1,7 +1,7 @@
 import { html } from 'hono/html';
 import type { Env } from '../env';
 import { loadEmbedFeed } from './loader';
-import { embedHeaders, renderLayout, embedFooter } from './layout';
+import { embedBackToMap, embedHeaders, renderLayout, embedFooter } from './layout';
 import { renderMap } from './map';
 import { renderExpiryWarning } from './route';
 import { formatGtfsTime } from './schedule';
@@ -158,6 +158,7 @@ export async function renderStopEmbed(
   const description = `Departures from ${stop.stop_name} on ${agencyName}.`;
 
   const body = html`
+    ${embedBackToMap(slug, t, theme, lang)}
     <header class="embed-header">
       ${feed.brandLogoUrl
         ? html`<img class="brand-logo" src="${feed.brandLogoUrl}" alt="${agencyName} logo" />`

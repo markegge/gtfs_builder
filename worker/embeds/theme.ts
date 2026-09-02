@@ -105,8 +105,8 @@ const DARK_CSS = `
   table.schedule thead th, table.schedule .corner, table.schedule .stop-name { background: #1d1813; color: #d8cab2; border-color: #2c241a; }
   table.schedule td, table.schedule th { border-color: #2c241a; }
   table.schedule .stop-name { color: #f2ece3; border-right-color: #3a2f22; }
-  .service-tabs { border-bottom-color: #3a2f22; }
-  .service-tabs a { color: #e7ddcd; }
+  .service-tabs, .embed-nav { border-bottom-color: #3a2f22; }
+  .service-tabs a, .embed-nav a { color: #e7ddcd; }
   .route-list a { color: #f2ece3; }
   .route-list a:hover { background: #241d15; }
   .dep-time, .dep-route, .dep-headsign { color: #f2ece3; }

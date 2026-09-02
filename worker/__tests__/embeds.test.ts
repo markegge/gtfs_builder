@@ -349,4 +349,120 @@ describe('embed routes', () => {
     const body = await res.text();
     expect(body).toContain('--brand: #a32d5e');
   });
+
+  // ─── Back-navigation out of the system map (issue #72) ─────────────────────
+  //
+  // The system map links to route pages, and its stop popups link to stop
+  // pages, neither with a `target` — so the click navigates *inside* the host's
+  // iframe. Both destinations need a visible way back or the rider is stranded
+  // with only the browser back button, which on mobile is no affordance at all.
+  describe('back link to the system map', () => {
+    it('route embed links back to the system map', async () => {
+      const client = await loggedInClient('emb-back1@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedBackRoute');
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`)
+      ).text();
+      expect(html).toContain(`href="/${slug}/embed/system-map?lang=en"`);
+      // The arrow is decorative — the accessible name is the visible text.
+      expect(html).toContain('<span class="arrow" aria-hidden="true">←</span>All routes');
+    });
+
+    it('stop embed links back to the system map (reachable from a map stop popup)', async () => {
+      const client = await loggedInClient('emb-back2@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedBackStop');
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/stop/s1`)
+      ).text();
+      expect(html).toContain(`href="/${slug}/embed/system-map?lang=en"`);
+      expect(html).toContain('<span class="arrow" aria-hidden="true">←</span>All routes');
+    });
+
+    it('localizes the label and keeps the language on the destination (es)', async () => {
+      const client = await loggedInClient('emb-back3@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedBackEs');
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?lang=es`)
+      ).text();
+      expect(html).toContain('Todas las rutas');
+      expect(html).not.toContain('All routes');
+      // Language survives the hop, so the rider doesn't land on an English map.
+      expect(html).toContain(`href="/${slug}/embed/system-map?lang=es"`);
+    });
+
+    it('carries the theme across so the destination keeps the host look (fr, dark, accent)', async () => {
+      const client = await loggedInClient('emb-back4@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedBackTheme');
+
+      const html = await (
+        await SELF.fetch(
+          `http://feeds.example.com/${slug}/embed/route/R1?lang=fr&theme=dark&accent=0055aa`,
+        )
+      ).text();
+      expect(html).toContain('Toutes les lignes');
+      expect(html).toContain(
+        `href="/${slug}/embed/system-map?accent=0055aa&amp;theme=dark&amp;lang=fr"`,
+      );
+    });
+
+    it('the system map does not link to itself', async () => {
+      const client = await loggedInClient('emb-back5@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedBackSelf');
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/system-map`)
+      ).text();
+      expect(html).not.toContain('class="embed-nav"');
+      expect(html).not.toContain(`href="/${slug}/embed/system-map`);
+      // The forward direction is untouched — it still links out to routes.
+      expect(html).toContain(`href="/${slug}/embed/route/R1"`);
+    });
+
+    it('the mini-site landing page keeps its own navigation (no back link)', async () => {
+      const client = await loggedInClient('emb-back6@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedBackLanding');
+
+      const html = await (await SELF.fetch(`http://feeds.example.com/${slug}`)).text();
+      expect(html).not.toContain('class="embed-nav"');
+    });
+
+    it('sectioned widget views stay chrome-free', async () => {
+      const client = await loggedInClient('emb-back7@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedBackViews');
+
+      const mapView = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?view=map`)
+      ).text();
+      const schedView = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?view=schedule`)
+      ).text();
+      expect(mapView).not.toContain('class="embed-nav"');
+      expect(schedView).not.toContain('class="embed-nav"');
+    });
+
+    it('leaves the ETag scheme intact — the href is a pure function of the cache key', async () => {
+      const client = await loggedInClient('emb-back8@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedBackEtag');
+
+      const first = await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`);
+      const etag = first.headers.get('ETag');
+      expect(etag).toBeTruthy();
+
+      const repeat = await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`, {
+        headers: { 'If-None-Match': etag as string },
+      });
+      expect(repeat.status).toBe(304);
+
+      // A different language renders a different back-link href, and is a
+      // different ETag variant — so it can never be served from the `en` key.
+      const es = await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?lang=es`, {
+        headers: { 'If-None-Match': etag as string },
+      });
+      expect(es.status).toBe(200);
+      expect(es.headers.get('ETag')).not.toBe(etag);
+    });
+  });
 });

@@ -28,6 +28,8 @@ const SUPPORTED: readonly EmbedLang[] = ['en', 'es', 'fr', 'de', 'pt'];
 export interface EmbedStrings {
   systemMap: string;
   routes: string;
+  // Visible label of the back link to the system map on route/stop embeds.
+  allRoutes: string;
   routesServingStop: string;
   departuresToday: (day: string) => string;
   noMoreDepartures: string;
@@ -55,6 +57,7 @@ export interface EmbedStrings {
 const EN: EmbedStrings = {
   systemMap: 'System map',
   routes: 'Routes',
+  allRoutes: 'All routes',
   routesServingStop: 'Routes that serve this stop',
   departuresToday: (day) => `Departures today (${day})`,
   noMoreDepartures: 'No more departures today from this stop.',
@@ -80,6 +83,7 @@ const EN: EmbedStrings = {
 const ES: EmbedStrings = {
   systemMap: 'Mapa del sistema',
   routes: 'Rutas',
+  allRoutes: 'Todas las rutas',
   routesServingStop: 'Rutas que pasan por esta parada',
   departuresToday: (day) => `Salidas de hoy (${day})`,
   noMoreDepartures: 'No hay más salidas hoy desde esta parada.',
@@ -105,6 +109,7 @@ const ES: EmbedStrings = {
 const FR: EmbedStrings = {
   systemMap: 'Plan du réseau',
   routes: 'Lignes',
+  allRoutes: 'Toutes les lignes',
   routesServingStop: 'Lignes desservant cet arrêt',
   departuresToday: (day) => `Départs aujourd’hui (${day})`,
   noMoreDepartures: 'Plus de départs aujourd’hui à cet arrêt.',
@@ -130,6 +135,7 @@ const FR: EmbedStrings = {
 const DE: EmbedStrings = {
   systemMap: 'Liniennetzplan',
   routes: 'Linien',
+  allRoutes: 'Alle Linien',
   routesServingStop: 'Linien an dieser Haltestelle',
   departuresToday: (day) => `Abfahrten heute (${day})`,
   noMoreDepartures: 'Heute keine weiteren Abfahrten an dieser Haltestelle.',
@@ -155,6 +161,7 @@ const DE: EmbedStrings = {
 const PT: EmbedStrings = {
   systemMap: 'Mapa do sistema',
   routes: 'Linhas',
+  allRoutes: 'Todas as linhas',
   routesServingStop: 'Linhas que servem esta parada',
   departuresToday: (day) => `Partidas de hoje (${day})`,
   noMoreDepartures: 'Não há mais partidas hoje desta parada.',
