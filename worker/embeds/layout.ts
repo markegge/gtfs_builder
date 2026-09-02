@@ -2,6 +2,8 @@ import { html, raw } from 'hono/html';
 import { mapboxAssetTags } from './map';
 import { planHasFeature } from '../billing/plans';
 import type { Plan } from '../projects/quotas';
+import type { EmbedLang, EmbedStrings } from './i18n';
+import type { EmbedTheme } from './theme';
 
 /**
  * The "Powered by GTFS·X" embed footer, with an optional agency suffix. Returns
@@ -13,6 +15,43 @@ export function embedFooter(ownerPlan: Plan, suffix?: string, poweredBy = 'Power
   return html`<footer class="embed-footer">
       ${poweredBy} <a href="https://gtfsx.com" target="_blank" rel="noopener">GTFS·X</a>${suffix ? html` · ${suffix}` : ''}
     </footer>`;
+}
+
+/**
+ * "← All routes" link back to the feed's system map, for the route and stop
+ * embeds.
+ *
+ * Both pages are reachable by clicking *inside* an embedded system map (a route
+ * in its route list, a stop dot on the map itself). Those links carry no
+ * `target`, so the navigation happens within the host's iframe and the rider
+ * has no visible way back — on mobile, no affordance at all (issue #72).
+ *
+ * Rendered unconditionally rather than only when the rider arrived from the
+ * map: a route embed placed on its own page still benefits from a link to the
+ * full map, and a referrer is not reliable inside an iframe anyway.
+ *
+ * The theme and language are carried across so the destination keeps the host's
+ * look and the rider's language. Both are rebuilt from the *parsed* theme and
+ * *resolved* lang — never the raw query string — so the href stays a pure
+ * function of the caller's ETag variant (themeCacheKey + lang) and cache
+ * semantics are unchanged.
+ */
+export function embedBackToMap(
+  slug: string,
+  t: EmbedStrings,
+  theme: EmbedTheme,
+  lang: EmbedLang,
+) {
+  const params = new URLSearchParams();
+  if (theme.accent) params.set('accent', theme.accent);
+  if (theme.mode !== 'light') params.set('theme', theme.mode);
+  if (theme.font !== 'system') params.set('font', theme.font);
+  params.set('lang', lang);
+  const href = `/${encodeURIComponent(slug)}/embed/system-map?${params.toString()}`;
+  // The arrow is decorative — the accessible name is the visible text label.
+  return html`<nav class="embed-nav" aria-label="${t.systemMap}">
+      <a href="${href}"><span class="arrow" aria-hidden="true">←</span>${t.allRoutes}</a>
+    </nav>`;
 }
 
 const STYLES = `
@@ -149,15 +188,15 @@ const STYLES = `
     margin-bottom: 16px;
   }
 
-  /* Service-day tabs */
-  .service-tabs {
+  /* Service-day tabs, and the back-to-system-map link that shares their look */
+  .service-tabs, .embed-nav {
     display: flex;
     gap: 4px;
     flex-wrap: wrap;
     margin-bottom: 12px;
     border-bottom: 1px solid #e8d8c0;
   }
-  .service-tabs a {
+  .service-tabs a, .embed-nav a {
     padding: 8px 14px;
     text-decoration: none;
     color: #1a1a1a;
@@ -167,12 +206,20 @@ const STYLES = `
     margin-bottom: -1px;
     transition: color 120ms;
   }
-  .service-tabs a:hover { color: var(--brand-deep); }
+  .service-tabs a:hover, .embed-nav a:hover { color: var(--brand-deep); }
   .service-tabs a.active {
     border-bottom-color: var(--brand);
     color: var(--brand-deep);
     font-weight: 700;
   }
+  /* Flush left so it lines up with the header beneath it. */
+  .embed-nav a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding-left: 0;
+  }
+  .embed-nav .arrow { font-size: 15px; line-height: 1; }
 
   /* Schedule table */
   .schedule-scroll {

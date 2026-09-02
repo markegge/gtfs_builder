@@ -1,7 +1,7 @@
 import { html } from 'hono/html';
 import type { Env } from '../env';
 import { loadEmbedFeed } from './loader';
-import { embedHeaders, renderLayout, embedFooter } from './layout';
+import { embedBackToMap, embedHeaders, renderLayout, embedFooter } from './layout';
 import { buildRouteMapData, renderMap } from './map';
 import { renderScheduleTables } from './schedule';
 import {
@@ -111,6 +111,11 @@ export async function renderRouteEmbed(
     ? `${shortName} ${longName} schedule and route map.`
     : `${shortName} schedule and route map.`;
 
+  // Back-navigation out of the embedded system map (#72). Used by the full page
+  // only: view=map / view=schedule are single-section widgets composed into a
+  // host page that supplies its own navigation, so they stay chrome-free.
+  const backToMap = embedBackToMap(slug, t, theme, lang);
+
   const header = html`
     <header class="embed-header">
       ${feed.brandLogoUrl
@@ -154,6 +159,7 @@ export async function renderRouteEmbed(
             ${beacon}
           `
         : html`
+            ${backToMap}
             ${header}
             ${expiryWarning}
             ${todayBanner}

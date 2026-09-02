@@ -464,8 +464,8 @@ Architecture: server-rendered HTML on the FEEDS origin (Hono `html` template), e
 | Surface | URL | Status |
 |---|---|---|
 | Mini-site landing | `feeds.*/<slug>/` | ✅ — agency name + contact, system map, route list, today's-service banner, `frame-ancestors 'none'`, indexable |
-| Per-route embed | `feeds.*/<slug>/embed/route/<route_id>` | ✅ — route map + schedule table with seasonal/day-pattern tabs, defaults to today's pattern |
-| Per-stop embed | `feeds.*/<slug>/embed/stop/<stop_id>` | ✅ — chronological "departures today" + map + routes serving the stop |
+| Per-route embed | `feeds.*/<slug>/embed/route/<route_id>` | ✅ — route map + schedule table with seasonal/day-pattern tabs, defaults to today's pattern; "← All routes" link back to the system map |
+| Per-stop embed | `feeds.*/<slug>/embed/stop/<stop_id>` | ✅ — chronological "departures today" + map + routes serving the stop; "← All routes" link back to the system map |
 | System-map embed | `feeds.*/<slug>/embed/system-map` | ✅ — all routes coloured, clickable stop dots, route list |
 | Sectioned route embed | `feeds.*/<slug>/embed/route/<route_id>?view=map\|schedule` | ✅ — map-only / schedule-only variants of the per-route page; powers the standalone web components |
 | Widgets loader | `feeds.*/widgets.js` | ✅ — declarative web-component loader registering `<gtfs-system-map>` / `<gtfs-route-map>` / `<gtfs-schedule>` / `<gtfs-stop>`, each wrapping the matching embed page in a sandboxed iframe |
