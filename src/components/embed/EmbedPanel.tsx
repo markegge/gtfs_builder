@@ -2,6 +2,16 @@ import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../../store';
 import { patchProject, getEmbedImpressions, type EmbedImpressions } from '../../services/projectsApi';
 import { ApiError } from '../../services/authApi';
+import {
+  fetchEmbedServiceProfiles,
+  type EmbedServiceProfile,
+} from '../../services/embedServicesApi';
+import {
+  DEFAULT_EMBED_OPTIONS,
+  optionsQuery,
+  servicePinApplies,
+  type EmbedOptions,
+} from './embedOptions';
 
 const FEEDS_ORIGIN =
   (import.meta.env.VITE_FEEDS_ORIGIN as string | undefined) ||
@@ -19,16 +29,8 @@ interface PublicationInfo {
  * for the system map and per-route embeds. Only visible after a feed is
  * published — embeds read from the canonical published snapshot.
  */
-// Per-embed theming/language the panel can preview + bake into copied snippets.
-// These are URL params honored by the embed pages (worker/embeds/theme.ts +
-// i18n.ts), never stored on the project — so they only affect the snippets the
-// agency copies, not the feed's saved brand color.
-interface EmbedOptions {
-  accent: string; // 6-char hex, no '#'; '' = use saved brand/default
-  mode: 'light' | 'dark';
-  font: 'system' | 'serif' | 'mono' | 'rounded';
-  lang: string; // BCP-47 primary subtag, '' = feed default
-}
+// Per-embed theming/language/service options live in ./embedOptions so the
+// query builder can be unit-tested away from React.
 
 const LANG_CHOICES: { code: string; label: string }[] = [
   { code: '', label: 'Feed default' },
@@ -39,15 +41,34 @@ const LANG_CHOICES: { code: string; label: string }[] = [
   { code: 'pt', label: 'Português' },
 ];
 
-/** Build the `?a=b&c=d` query string for the chosen embed options (empty when all defaults). */
-function optionsQuery(opts: EmbedOptions): string {
-  const qs = new URLSearchParams();
-  if (opts.accent) qs.set('accent', opts.accent);
-  if (opts.mode !== 'light') qs.set('theme', opts.mode);
-  if (opts.font !== 'system') qs.set('font', opts.font);
-  if (opts.lang) qs.set('lang', opts.lang);
-  const s = qs.toString();
-  return s ? `?${s}` : '';
+/**
+ * Load the published feed's service profiles. Keyed on the snapshot id as well
+ * as the slug so republishing refetches — the ids are derived from the
+ * published calendars, and a republish can add, drop or re-key a profile.
+ */
+function useServiceProfiles(slug: string | null, snapshotId: string | null) {
+  const [profiles, setProfiles] = useState<EmbedServiceProfile[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!slug || !snapshotId) return;
+    const ctrl = new AbortController();
+    setProfiles(null);
+    setError(null);
+    (async () => {
+      try {
+        const list = await fetchEmbedServiceProfiles(FEEDS_ORIGIN, slug, ctrl.signal);
+        if (!ctrl.signal.aborted) setProfiles(list);
+      } catch (err) {
+        if (ctrl.signal.aborted) return;
+        setError(err instanceof Error ? err.message : 'Could not load service patterns');
+        setProfiles([]);
+      }
+    })();
+    return () => ctrl.abort();
+  }, [slug, snapshotId]);
+
+  return { profiles, error };
 }
 
 export function EmbedPanel() {
@@ -56,12 +77,7 @@ export function EmbedPanel() {
   const feedsProjects = useStore((s) => s.feedsProjects);
   const activeServerProjectId = useStore((s) => s.activeServerProjectId);
 
-  const [options, setOptions] = useState<EmbedOptions>({
-    accent: '',
-    mode: 'light',
-    font: 'system',
-    lang: '',
-  });
+  const [options, setOptions] = useState<EmbedOptions>(DEFAULT_EMBED_OPTIONS);
 
   const project = activeServerProjectId
     ? feedsProjects.find((p) => p.id === activeServerProjectId)
@@ -69,6 +85,20 @@ export function EmbedPanel() {
 
   const pub: PublicationInfo | null =
     project && currentPublication ? { slug: project.slug, snapshotId: currentPublication.snapshotId } : null;
+
+  const { profiles, error: profilesError } = useServiceProfiles(
+    pub?.slug ?? null,
+    pub?.snapshotId ?? null,
+  );
+
+  // A republish can drop or re-key a profile (editing calendar.txt's dates
+  // changes the id). Fall back to Automatic visibly rather than leaving a
+  // selection that resolves to nothing.
+  const pinnedStillExists =
+    !options.service || !profiles || profiles.some((p) => p.id === options.service);
+  useEffect(() => {
+    if (!pinnedStillExists) setOptions((o) => ({ ...o, service: '' }));
+  }, [pinnedStillExists]);
 
   if (!pub || !project) {
     return (
@@ -80,18 +110,95 @@ export function EmbedPanel() {
     );
   }
 
-  const query = optionsQuery(options);
+  // The system map has no service-day concept, so its snippet never carries a
+  // `service` param (see optionsQuery's `includeService`).
+  const systemMapQuery = optionsQuery(options);
+  // A pinned profile only applies to routes that actually run it; RouteSnippets
+  // and WidgetsSection decide per route.
+  const pinned = options.service ? profiles?.find((p) => p.id === options.service) ?? null : null;
 
   return (
     <div className="overflow-y-auto p-6 space-y-6">
       <BrandColorSection projectId={project.id} initialColor={project.brandPrimaryColor ?? null} />
       <ThemeSection options={options} onChange={setOptions} />
-      <SystemMapSnippet slug={pub.slug} query={query} />
-      <RouteSnippets slug={pub.slug} routes={routes} query={query} />
-      <WidgetsSection slug={pub.slug} routes={routes} options={options} />
+      <ServiceSection
+        profiles={profiles}
+        error={profilesError}
+        options={options}
+        onChange={setOptions}
+      />
+      <SystemMapSnippet slug={pub.slug} query={systemMapQuery} />
+      <RouteSnippets slug={pub.slug} routes={routes} options={options} pinned={pinned} />
+      <WidgetsSection slug={pub.slug} routes={routes} options={options} pinned={pinned} />
       <JsonApiSection slug={pub.slug} />
       <ImpressionsSection projectId={project.id} />
     </div>
+  );
+}
+
+/**
+ * Service-pattern picker. Its own section rather than part of "Theme &
+ * language" — pinning a schedule is a content choice, not a cosmetic one.
+ *
+ * The options come from the published snapshot's `/api/v1/services`, which is
+ * also where the embed pages resolve `?service=` from. Before this existed the
+ * profile id was surfaced nowhere in the product: an agency had to open the
+ * live embed, click a service-day tab, and copy the id out of the address bar.
+ */
+function ServiceSection({
+  profiles,
+  error,
+  options,
+  onChange,
+}: {
+  profiles: EmbedServiceProfile[] | null;
+  error: string | null;
+  options: EmbedOptions;
+  onChange: (o: EmbedOptions) => void;
+}) {
+  return (
+    <section>
+      <h3 className="font-heading font-bold text-sm text-dark-brown mb-1">Service pattern</h3>
+      <p className="text-xs text-warm-gray mb-3">
+        Per-route embeds open on today’s service by default. Pin one here to always show a
+        particular schedule — a Saturday timetable on a weekend-service page, say, or a
+        seasonal pattern. Riders can still switch tabs.
+      </p>
+      {error ? (
+        <p className="text-xs text-red-600">{error}</p>
+      ) : profiles === null ? (
+        <p className="text-xs text-warm-gray">Loading service patterns…</p>
+      ) : profiles.length === 0 ? (
+        <p className="text-xs text-warm-gray">
+          This feed’s published snapshot has no <code className="text-coral">calendar.txt</code>{' '}
+          service patterns, so there’s nothing to pin.
+        </p>
+      ) : (
+        <>
+          <label className="flex flex-col gap-1 max-w-xs">
+            <span className="text-[11px] font-heading font-semibold text-brown">
+              Service shown in copied embeds
+            </span>
+            <select
+              value={options.service}
+              onChange={(e) => onChange({ ...options, service: e.target.value })}
+              className="px-2 py-1.5 rounded-md border border-sand text-sm focus:outline-none focus:border-coral"
+            >
+              <option value="">Automatic (today’s service)</option>
+              {profiles.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="text-[11px] text-warm-gray mt-2">
+            These patterns come from your published feed. Republish after changing{' '}
+            <code className="text-coral">calendar.txt</code> so the pinned id keeps matching.
+          </p>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -301,11 +408,13 @@ function SystemMapSnippet({ slug, query }: { slug: string; query: string }) {
 function RouteSnippets({
   slug,
   routes,
-  query,
+  options,
+  pinned,
 }: {
   slug: string;
   routes: { route_id: string; route_short_name: string; route_long_name: string; route_color: string; route_text_color: string }[];
-  query: string;
+  options: EmbedOptions;
+  pinned: EmbedServiceProfile | null;
 }) {
   const sorted = useMemo(
     () =>
@@ -331,11 +440,15 @@ function RouteSnippets({
       <h3 className="font-heading font-bold text-sm text-dark-brown mb-1">Per-route embeds</h3>
       <p className="text-xs text-warm-gray mb-2">
         One iframe per route. Includes the route map, schedule table, and a service-day selector
-        (defaults to today).
+        (defaults to today unless you pin a service pattern above).
       </p>
       <div className="space-y-3">
         {sorted.map((r) => {
-          const url = `${FEEDS_ORIGIN}/${encodeURIComponent(slug)}/embed/route/${encodeURIComponent(r.route_id)}${query}`;
+          // A pin only means something on routes that actually run it. Emitting
+          // it elsewhere would produce a snippet that reads as pinned while the
+          // embed quietly falls back to today's service.
+          const pinApplies = servicePinApplies(pinned, r.route_id);
+          const url = `${FEEDS_ORIGIN}/${encodeURIComponent(slug)}/embed/route/${encodeURIComponent(r.route_id)}${optionsQuery(options, { includeService: pinApplies })}`;
           return (
             <div key={r.route_id} className="border border-sand rounded-lg p-3">
               <div className="flex items-center gap-3 mb-2">
@@ -354,6 +467,11 @@ function RouteSnippets({
                 label="iframe"
                 snippet={`<iframe src="${url}" width="100%" height="700" frameborder="0" loading="lazy" title="${escapeAttr(r.route_long_name || r.route_short_name || r.route_id)}"></iframe>`}
               />
+              {pinned && !pinApplies && (
+                <p className="text-[11px] text-warm-gray mt-1">
+                  No {pinned.label} trips on this route — this snippet uses the automatic service.
+                </p>
+              )}
               <PreviewLink url={url} />
             </div>
           );
@@ -373,10 +491,12 @@ function WidgetsSection({
   slug,
   routes,
   options,
+  pinned,
 }: {
   slug: string;
   routes: { route_id: string; route_short_name: string; route_long_name: string }[];
   options: EmbedOptions;
+  pinned: EmbedServiceProfile | null;
 }) {
   const scriptTag = `<script src="${FEEDS_ORIGIN}/widgets.js" defer></script>`;
   // Theme/language attributes mirror the page params; only emit the non-default
@@ -396,6 +516,14 @@ function WidgetsSection({
     });
     return sorted[0]?.route_id ?? 'ROUTE_ID';
   }, [routes]);
+
+  // `service` goes only on the two tags whose builders forward it
+  // (worker/embeds/widgets.ts withService) — <gtfs-system-map> and <gtfs-stop>
+  // would accept the attribute and ignore it. Suppressed when the sample route
+  // doesn't run the pinned pattern, for the same reason as the iframes above.
+  const serviceAttr =
+    pinned && servicePinApplies(pinned, sample) ? ` service="${escapeAttr(pinned.id)}"` : '';
+  const routeTagAttrs = `${themeAttrs}${serviceAttr}`;
 
   const slugAttr = escapeAttr(slug);
   const routeAttr = escapeAttr(sample);
@@ -426,11 +554,11 @@ function WidgetsSection({
         />
         <WidgetTag
           desc="A single route’s map."
-          snippet={`<gtfs-route-map feed="${slugAttr}" route="${routeAttr}"${themeAttrs}></gtfs-route-map>`}
+          snippet={`<gtfs-route-map feed="${slugAttr}" route="${routeAttr}"${routeTagAttrs}></gtfs-route-map>`}
         />
         <WidgetTag
           desc="A single route’s schedule table (with service-day tabs)."
-          snippet={`<gtfs-schedule feed="${slugAttr}" route="${routeAttr}"${themeAttrs}></gtfs-schedule>`}
+          snippet={`<gtfs-schedule feed="${slugAttr}" route="${routeAttr}"${routeTagAttrs}></gtfs-schedule>`}
         />
         <WidgetTag
           desc="Departures from one stop (replace STOP_ID)."
@@ -457,6 +585,7 @@ function JsonApiSection({ slug }: { slug: string }) {
     { method: 'GET', path: '/stops', desc: 'All stops.' },
     { method: 'GET', path: '/stops/{stop_id}', desc: 'One stop and the routes that serve it.' },
     { method: 'GET', path: '/stops/{stop_id}/schedule', desc: 'A stop’s departures, grouped by service.' },
+    { method: 'GET', path: '/services', desc: 'Service patterns and the ids the embeds accept as ?service=.' },
   ];
 
   return (

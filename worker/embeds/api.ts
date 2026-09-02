@@ -19,12 +19,14 @@
 //   /<slug>/api/v1/stops                    all stops (id, code, name, lat/lon, accessibility)
 //   /<slug>/api/v1/stops/<stop_id>          one stop + the routes that serve it
 //   /<slug>/api/v1/stops/<stop_id>/schedule that stop's scheduled departures, grouped by service
+//   /<slug>/api/v1/services                 the feed's service profiles + their `?service=` ids
 //
 // No write surface, no auth tokens — published feeds are public data.
 
 import type { Env } from '../env';
 import { loadEmbedFeed } from './loader';
 import { planHasFeature } from '../billing/plans';
+import { buildServiceProfiles } from './services';
 import type { LoadedEmbedFeed, Route, Stop, Trip, StopTime } from './types';
 
 export const API_VERSION = 'v1';
@@ -37,6 +39,7 @@ const API_ROUTE_RE = /^\/([a-z0-9][a-z0-9-]*)\/api\/v1\/routes\/([^/?#]+)\/?$/;
 const API_STOPS_RE = /^\/([a-z0-9][a-z0-9-]*)\/api\/v1\/stops\/?$/;
 const API_STOP_RE = /^\/([a-z0-9][a-z0-9-]*)\/api\/v1\/stops\/([^/?#]+)\/?$/;
 const API_STOP_SCHEDULE_RE = /^\/([a-z0-9][a-z0-9-]*)\/api\/v1\/stops\/([^/?#]+)\/schedule\/?$/;
+const API_SERVICES_RE = /^\/([a-z0-9][a-z0-9-]*)\/api\/v1\/services\/?$/;
 
 /** True for any path this module handles, so feedsHandler can route to it. */
 export function isApiPath(pathname: string): boolean {
@@ -61,6 +64,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     const routeId = decodeURIComponent(m[2]);
     return serve(request, env, m[1], (f) => apiRoute(f, routeId), `route-${m![2]}`);
   }
+  if ((m = path.match(API_SERVICES_RE))) return serve(request, env, m[1], apiServices, 'services');
   if ((m = path.match(API_STOPS_RE))) return serve(request, env, m[1], apiStops);
   if ((m = path.match(API_STOP_SCHEDULE_RE))) {
     const stopId = decodeURIComponent(m[2]);
@@ -177,7 +181,66 @@ function apiIndex(feed: LoadedEmbedFeed, env: Env) {
       stops: `${base}/stops`,
       stop: `${base}/stops/{stop_id}`,
       stop_schedule: `${base}/stops/{stop_id}/schedule`,
+      services: `${base}/services`,
     },
+  };
+}
+
+/**
+ * GET /<slug>/api/v1/services — the feed's service profiles.
+ *
+ * A profile is the group of calendar.txt rows sharing a day pattern AND a date
+ * range: what a rider sees as a "Weekday" / "Saturday" / "Weekday (Jun 1–Aug 31)"
+ * tab. Its `id` is the value the embed pages accept as `?service=<id>` (and the
+ * `<gtfs-route-map>` / `<gtfs-schedule>` `service=` attribute) to pin a pattern
+ * instead of auto-selecting today's.
+ *
+ * Computed from the SAME published snapshot the embeds render, by the same
+ * `buildServiceProfiles`. That matters: an id derived from anything else (live
+ * editor state, a second hash implementation) would stop matching the moment
+ * the two drifted, and the embed would silently fall back to today's service.
+ *
+ * Deliberately carries no "which profile is active today" field — the response
+ * is edge-cached against a snapshot-derived ETag, so anything time-dependent
+ * would be served stale. Today's profile is resolved per-request by the embed.
+ *
+ * `route_ids` lists the routes that actually have a trip on the profile, so a
+ * caller can offer only the patterns that mean something for a given route.
+ * Services referenced only via calendar_dates.txt (no calendar.txt row) form no
+ * profile and so appear here on no route.
+ */
+function apiServices(feed: LoadedEmbedFeed) {
+  const profiles = buildServiceProfiles(feed.state.calendars);
+
+  const routesByService = new Map<string, Set<string>>();
+  for (const t of feed.state.trips) {
+    let set = routesByService.get(t.service_id);
+    if (!set) {
+      set = new Set<string>();
+      routesByService.set(t.service_id, set);
+    }
+    set.add(t.route_id);
+  }
+
+  // Present route_ids in the same order as /routes rather than trip order.
+  const routeOrder = new Map<string, number>(
+    feed.state.routes.slice().sort(byRouteName).map((r, i) => [r.route_id, i]),
+  );
+  const rank = (id: string) => routeOrder.get(id) ?? Number.MAX_SAFE_INTEGER;
+
+  return {
+    services: profiles.map((p) => {
+      const routeIds = new Set<string>();
+      for (const serviceId of p.serviceIds) {
+        for (const routeId of routesByService.get(serviceId) ?? []) routeIds.add(routeId);
+      }
+      return {
+        id: p.id,
+        label: p.label,
+        service_ids: p.serviceIds,
+        route_ids: Array.from(routeIds).sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)),
+      };
+    }),
   };
 }
 

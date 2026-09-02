@@ -235,6 +235,76 @@ describe('JSON API (feeds.*/<slug>/api/v1)', () => {
     expect(res.status).toBe(404);
   });
 
+  // ─── /services — the service-profile catalogue ──────────────────────────────
+  //
+  // This is what makes a `?service=` pin discoverable. Before it existed the id
+  // was surfaced nowhere: an integrator had to open the live embed, click a
+  // service-day tab, and copy the value out of the address bar.
+
+  it('GET /<slug>/api/v1/services enumerates the feed’s service profiles', async () => {
+    const { client } = await loggedInClient('api-svc1@example.com');
+    const { slug } = await createPublishedProject(client, 'ApiServices');
+    const res = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1/services`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Type')).toContain('application/json');
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
+
+    const body = await res.json() as {
+      services: { id: string; label: string; service_ids: string[]; route_ids: string[] }[];
+    };
+    // Ordered Weekday → Saturday → Sunday → Daily → other.
+    expect(body.services.map((s) => s.label)).toEqual(['Saturday', 'Daily']);
+    for (const s of body.services) {
+      expect(s.id).toMatch(/^svc-[0-9a-z]+$/);
+    }
+    const sat = body.services.find((s) => s.label === 'Saturday');
+    expect(sat?.service_ids).toEqual(['SAT']);
+    const daily = body.services.find((s) => s.label === 'Daily');
+    expect(daily?.service_ids).toEqual(['DAILY']);
+  });
+
+  it('reports which routes each service profile actually runs on', async () => {
+    const { client } = await loggedInClient('api-svc2@example.com');
+    const { slug } = await createPublishedProject(client, 'ApiServiceRoutes');
+    const res = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1/services`);
+    const body = await res.json() as { services: { label: string; route_ids: string[] }[] };
+    // DAILY runs on R1 (t1/t2) and R2 (t4); SAT only on R1 (t3).
+    expect(body.services.find((s) => s.label === 'Daily')?.route_ids).toEqual(['R1', 'R2']);
+    expect(body.services.find((s) => s.label === 'Saturday')?.route_ids).toEqual(['R1']);
+  });
+
+  it('lists /services in the discovery document', async () => {
+    const { client } = await loggedInClient('api-svc3@example.com');
+    const { slug } = await createPublishedProject(client, 'ApiServiceDiscovery');
+    const res = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1`);
+    const body = await res.json() as { endpoints: Record<string, string> };
+    expect(body.endpoints.services).toContain('/api/v1/services');
+  });
+
+  it('serves /services with the same cache + conditional-request profile as the rest of the API', async () => {
+    const { client } = await loggedInClient('api-svc4@example.com');
+    const { slug } = await createPublishedProject(client, 'ApiServiceEtag');
+    const first = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1/services`);
+    expect(first.status).toBe(200);
+    expect(first.headers.get('Cache-Control')).toContain('s-maxage=3600');
+    const etag = first.headers.get('ETag');
+    expect(etag).toBeTruthy();
+    const second = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1/services`, {
+      headers: { 'If-None-Match': etag as string },
+    });
+    expect(second.status).toBe(304);
+  });
+
+  it('gates /services behind the embeds entitlement like every other endpoint', async () => {
+    const { client, userId } = await loggedInClient('api-svc-free@example.com');
+    const { slug } = await createPublishedProject(client, 'ApiServiceFree');
+    await testEnv.DB.prepare('UPDATE user SET plan = ? WHERE id = ?').bind('free', userId).run();
+    const res = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1/services`);
+    expect(res.status).toBe(403);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe('plan_required');
+  });
+
   it('returns 403 when the feed owner lacks the embeds entitlement', async () => {
     // Publish as a paid user (publishing itself is Agency+), then downgrade the
     // owner to free in the DB. The JSON API resolves the owner plan live at
