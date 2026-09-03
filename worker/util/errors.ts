@@ -51,7 +51,11 @@ export class ApiError extends HTTPException {
 
 export const unauthenticated = (msg = 'Sign in required') => new ApiError(401, 'unauthenticated', msg);
 export const forbidden = (msg = 'Not allowed') => new ApiError(403, 'forbidden', msg);
-export const notFound = (msg = 'Not found') => new ApiError(404, 'not_found', msg);
+// `extra` is merged into the JSON body alongside { error, message } — used to
+// distinguish two 404s that mean very different things (e.g. a working state
+// that was never saved vs. one whose R2 blob has gone missing).
+export const notFound = (msg = 'Not found', extra?: Record<string, unknown>) =>
+  new ApiError(404, 'not_found', msg, extra);
 export const conflict = (msg: string, extra?: Record<string, unknown>) => new ApiError(409, 'conflict', msg, extra);
 export const validationFailed = (msg: string, extra?: Record<string, unknown>) => new ApiError(422, 'validation_failed', msg, extra);
 export const rateLimited = (msg = 'Too many requests') => new ApiError(429, 'rate_limited', msg);

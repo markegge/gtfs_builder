@@ -121,16 +121,31 @@ export function MyFeedsSource({ onSelect }: Props) {
             ) : (
               feeds.map((feed) => {
                 const isImporting = importingId === feed.id;
-                // Only block input while another import is in flight; every feed
-                // is importable now (published or draft).
-                const disabled = importingId !== null;
+                // About a quarter of a typical account's feeds have nothing in
+                // them, and the server sorts never-saved feeds to the TOP of
+                // this list (a null working_state_updated_at falls back to
+                // creation time) — so the entries a user reaches for first were
+                // precisely the ones that could only ever fail.
+                //
+                // Only 'empty' (no working state at all) is blocked: that one is
+                // certain, because the fetch is guaranteed to 404. 'likely-empty'
+                // is a size heuristic and gzip makes it fallible — a real
+                // 12-route feed can compress below the empty shell — so it only
+                // ever annotates. Never disable on a guess.
+                const disabled = importingId !== null || feed.content === 'empty';
                 return (
                   <button
                     key={feed.id}
                     type="button"
                     onClick={() => handleImport(feed)}
                     disabled={disabled}
-                    title="Import routes/stops from this feed"
+                    title={
+                      feed.content === 'empty'
+                        ? 'This feed has nothing saved in it yet — nothing to import'
+                        : feed.content === 'likely-empty'
+                          ? 'This feed looks empty, but you can still try importing from it'
+                          : 'Import routes/stops from this feed'
+                    }
                     className={`w-full text-left block select-none px-3 py-2.5 transition-colors ${
                       disabled ? 'opacity-60 cursor-not-allowed' : 'hover:bg-cream'
                     }`}
@@ -146,8 +161,18 @@ export function MyFeedsSource({ onSelect }: Props) {
                           </span>
                         </div>
                       </div>
-                      <span className="text-xs text-coral font-semibold whitespace-nowrap pt-0.5">
-                        {isImporting ? 'Loading…' : 'Import →'}
+                      <span
+                        className={`text-xs font-semibold whitespace-nowrap pt-0.5 ${
+                          feed.content === 'ok' ? 'text-coral' : 'text-warm-gray'
+                        }`}
+                      >
+                        {feed.content === 'empty'
+                          ? 'empty — nothing to import'
+                          : isImporting
+                            ? 'Loading…'
+                            : feed.content === 'likely-empty'
+                              ? 'looks empty · Import →'
+                              : 'Import →'}
                       </span>
                     </div>
                   </button>

@@ -136,6 +136,65 @@ describe('/api/projects/:id/snapshots', () => {
     expect(r2after).toBeNull();
   });
 
+  // ── "Save a version" must not leave the live feed behind ─────────────────
+  //
+  // The bug: a snapshot POST wrote the version and nothing else, so a user who
+  // treated "Save a version" as Save ended up with their content in an
+  // immutable snapshot and a feed that opens blank. The web client now saves
+  // the working state first, but the route is public API — this is the
+  // server-side backstop for every other caller.
+  describe('working-state backstop', () => {
+    it('seeds the working state when the feed has never had one', async () => {
+      const client = await loggedInClient('seed1@example.com');
+      const proj = await client.json<{ id: string; workingStateVersion: number }>(
+        await client.post('/api/projects', { name: 'Never saved' }),
+      );
+      expect(proj.workingStateVersion).toBe(0);
+      // Precondition: opening this feed right now gives you nothing.
+      expect((await client.get(`/api/projects/${proj.id}/working-state`)).status).toBe(404);
+
+      const created = await postSnapshot(
+        client,
+        proj.id,
+        { routes: [{ route_id: 'R1' }], stops: [] },
+        { summary: {}, validationErrors: 0, validationWarnings: 0 },
+      );
+      // The new version token is handed back so the client's If-Match stays fresh.
+      expect((created as { workingStateVersion?: number }).workingStateVersion).toBe(1);
+
+      // …and the live feed is no longer blank.
+      const ws = await client.get(`/api/projects/${proj.id}/working-state`);
+      expect(ws.status).toBe(200);
+      expect(await ws.json()).toEqual({ routes: [{ route_id: 'R1' }], stops: [] });
+    });
+
+    it('NEVER overwrites a working state that already exists', async () => {
+      const client = await loggedInClient('seed2@example.com');
+      const proj = await client.json<{ id: string }>(
+        await client.post('/api/projects', { name: 'Already saved' }),
+      );
+      const live = { routes: [{ route_id: 'LIVE' }] };
+      await client.put(`/api/projects/${proj.id}/working-state`, undefined, {
+        body: await gzip(JSON.stringify(live)),
+        headers: { 'Content-Encoding': 'gzip', 'If-Match': '0', 'Content-Type': 'application/json' },
+      });
+
+      // A snapshot of some OTHER state (e.g. a stale tab) must not clobber it —
+      // the server cannot tell a stale live state from an intentional one.
+      const created = await postSnapshot(
+        client,
+        proj.id,
+        { routes: [{ route_id: 'SNAPSHOT' }] },
+        { summary: {}, validationErrors: 0, validationWarnings: 0 },
+      );
+      expect((created as { workingStateVersion?: number }).workingStateVersion).toBeUndefined();
+
+      const ws = await client.get(`/api/projects/${proj.id}/working-state`);
+      expect(await ws.json()).toEqual(live);
+      expect(ws.headers.get('X-Working-State-Version')).toBe('1');
+    });
+  });
+
   it('POST snapshot with missing meta returns 422', async () => {
     const client = await loggedInClient('ver5@example.com');
     const proj = await client.json<{ id: string }>(

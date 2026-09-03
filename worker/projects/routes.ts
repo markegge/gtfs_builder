@@ -509,6 +509,10 @@ projectsRouter.get('/:id', async (c) => {
   return c.json({
     ...shapeProject(row),
     access,
+    // `snapshots` is capped at 20 for display; snapshotCount is the true total,
+    // which is what the "live state is empty but N versions exist" warning has
+    // to quote. fetchWorkingState reads it on the 404 path.
+    snapshotCount: await countSnapshots(c.env, row.id),
     snapshots: (snapshots.results ?? []).map(shapeSnapshot),
   });
 });
@@ -942,13 +946,36 @@ projectsRouter.get('/:id/working-state', async (c) => {
   const user = c.var.user!;
   const id = c.req.param('id');
   const { row } = await requireOwnedProject(c.env, user, id, 'viewer');
-  if (!row.working_state_r2_key) throw notFound('No working state yet');
+  // How many saved versions this feed has. The client needs it on BOTH the
+  // success path and the 404 path: an editor that opens to an empty canvas has
+  // to be able to say "…but N saved versions exist, restore one" instead of
+  // silently showing a blank feed (the state 16 prod feeds were found in).
+  const snapshotCount = await countSnapshots(c.env, row.id);
+
+  // Two very different 404s, and they must never look the same again:
+  //   - no key at all      → the feed has genuinely never been saved. Normal.
+  //   - key set, blob gone → REAL DATA LOSS. Should be impossible; if it ever
+  //     happens we need to hear about it immediately, not in a quarterly sweep.
+  if (!row.working_state_r2_key) {
+    throw notFound('No working state yet', { reason: 'never_saved', snapshotCount });
+  }
 
   const object = await getFeedBlob(c.env, row.working_state_r2_key);
-  if (!object) throw notFound('Working state blob missing');
+  if (!object) {
+    console.error('[working-state] R2 blob missing for a project that has one recorded', {
+      projectId: row.id,
+      slug: row.slug,
+      key: row.working_state_r2_key,
+      version: row.working_state_version,
+      size: row.working_state_size,
+      snapshotCount,
+    });
+    throw notFound('Working state blob missing', { reason: 'blob_missing', snapshotCount });
+  }
 
   c.header('Content-Type', 'application/json');
   c.header('X-Working-State-Version', String(row.working_state_version));
+  c.header('X-Snapshot-Count', String(snapshotCount));
   // Decompress in the worker. Manually-set Content-Encoding on a Worker
   // response isn't auto-decompressed by browser fetch (only transport-layer
   // negotiated encodings are), so the client receives raw gzip bytes and
@@ -1121,12 +1148,57 @@ projectsRouter.post('/:id/snapshots', async (c) => {
     )
     .run();
 
+  // ── Backstop: seed the working state when the feed has never had one ──────
+  //
+  // "Save a version" used to write ONLY the version, so a user who treated it
+  // as Save ended up with all their content in an immutable snapshot and a feed
+  // that opens as a blank canvas. The web client now saves the working state
+  // FIRST (see services/versionSave.ts), which makes this branch a no-op for
+  // it — but the route is public API, and any other caller deserves the same
+  // guarantee.
+  //
+  // Deliberately narrow: only when `working_state_r2_key IS NULL`, i.e. there
+  // is literally nothing to overwrite and no version to conflict with. A feed
+  // that HAS a working state is left strictly alone — the server cannot tell a
+  // stale live state from an intentionally-different one, and clobbering it
+  // would be the same class of bug pointing the other way. Locked feeds are
+  // skipped for the same reason a direct PUT is refused on them.
+  let seededWorkingStateVersion: number | null = null;
+  if (!row.working_state_r2_key && row.locked !== 1) {
+    const wsKey = workingStateKey(row.id);
+    await putFeedBlob(c.env, wsKey, stateBuf, {
+      contentType: 'application/json',
+      contentEncoding: 'gzip',
+    });
+    // Guarded on the version we read, so a real save that raced us wins and
+    // this becomes a no-op rather than resetting their counter.
+    const seeded = await c.env.DB.prepare(
+      `UPDATE feed_project
+          SET working_state_r2_key = ?,
+              working_state_version = working_state_version + 1,
+              working_state_size = ?,
+              working_state_updated_at = ?,
+              updated_at = ?
+        WHERE id = ? AND working_state_r2_key IS NULL AND working_state_version = ?`,
+    )
+      .bind(wsKey, stateSize, now, now, row.id, row.working_state_version)
+      .run();
+    if (((seeded.meta as { changes?: number } | undefined)?.changes ?? 0) > 0) {
+      seededWorkingStateVersion = row.working_state_version + 1;
+    }
+  }
+
   await logAudit(c.env, {
     actorUserId: user.id,
     subjectType: 'snapshot',
     subjectId: snapshotId,
     action: 'project.create_snapshot',
-    metadata: { projectId: row.id, label: meta.label ?? null, size: stateSize },
+    metadata: {
+      projectId: row.id,
+      label: meta.label ?? null,
+      size: stateSize,
+      ...(seededWorkingStateVersion !== null ? { seededWorkingState: true } : {}),
+    },
     ip: clientIp(c.req.raw),
   });
 
@@ -1139,6 +1211,12 @@ projectsRouter.post('/:id/snapshots', async (c) => {
       validationErrors: meta.validationErrors,
       validationWarnings: meta.validationWarnings,
     },
+    // Present only when this request seeded the working state. The client
+    // adopts it as its If-Match token so the next Save doesn't 409 against a
+    // version it never saw.
+    ...(seededWorkingStateVersion !== null
+      ? { workingStateVersion: seededWorkingStateVersion }
+      : {}),
   });
 });
 

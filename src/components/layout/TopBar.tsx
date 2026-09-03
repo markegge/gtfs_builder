@@ -31,7 +31,11 @@ export function TopBar() {
   const upsertFeedProject = useStore((s) => s.upsertFeedProject);
   const routesCount = useStore((s) => s.routes.length);
   const stopsCount = useStore((s) => s.stops.length);
+  const tripsCount = useStore((s) => s.trips.length);
   const agenciesCount = useStore((s) => s.agencies.length);
+  // Set when this feed opened to a blank canvas it shouldn't have (saved
+  // versions exist, or its blob is missing) — see feedsSlice.
+  const emptyWorkingState = useStore((s) => s.emptyWorkingState);
   const navigate = useNavigate();
   // /demo is a read-only preview surface — drop the Save button so
   // visitors don't get prompted to upgrade or create an account just
@@ -43,6 +47,7 @@ export function TopBar() {
   const [editing, setEditing] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [showSaveAs, setShowSaveAs] = useState(false);
+  const [showEmptySaveConfirm, setShowEmptySaveConfirm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Mobile-only: Save / Import / Export collapse into a single overflow menu
@@ -71,6 +76,15 @@ export function TopBar() {
   // worth exporting — no agency, no routes, no stops.
   const hasContent = agenciesCount > 0 || routesCount > 0 || stopsCount > 0;
 
+  // The recoverable blank canvas: this feed loaded empty even though its
+  // content is somewhere (a saved version, or a blob we couldn't read), and the
+  // editor STILL has nothing in it. Saving now writes that emptiness over the
+  // live feed — harmless to the versions themselves, but it cements the blank
+  // state, resets the "never saved" signal that makes the problem diagnosable,
+  // and reads to the user as confirmation that the empty feed is correct.
+  const wouldSaveOverRecoverableEmpty =
+    emptyWorkingState !== null && routesCount === 0 && stopsCount === 0 && tripsCount === 0;
+
   const handleSaveClick = async () => {
     setSaveError(null);
     if (!currentUser) {
@@ -86,6 +100,15 @@ export function TopBar() {
       setShowSaveAs(true);
       return;
     }
+    if (wouldSaveOverRecoverableEmpty) {
+      setShowEmptySaveConfirm(true);
+      return;
+    }
+    await runSave();
+  };
+
+  const runSave = async () => {
+    if (!activeServerProjectId) return;
     setSaving(true);
     try {
       await saveProjectNow(activeServerProjectId);
@@ -255,6 +278,39 @@ export function TopBar() {
       )}
       {showExport && <ExportDialog onClose={() => setShowExport(false)} />}
       {showSaveAs && <SaveAsDialog onClose={() => setShowSaveAs(false)} />}
+
+      {showEmptySaveConfirm && emptyWorkingState && (
+        <ConfirmDialog
+          title="Save an empty feed?"
+          body={
+            emptyWorkingState.snapshotCount > 0 ? (
+              <>
+                There is nothing in this editor, and this feed has{' '}
+                <strong>
+                  {emptyWorkingState.snapshotCount} saved version
+                  {emptyWorkingState.snapshotCount === 1 ? '' : 's'}
+                </strong>{' '}
+                that {emptyWorkingState.snapshotCount === 1 ? 'probably holds' : 'probably hold'} your
+                work. Saving now stores the empty feed. Open{' '}
+                <strong>Versions</strong> in the bottom panel and restore one instead.
+              </>
+            ) : (
+              <>
+                There is nothing in this editor, and this feed's saved data couldn't be
+                loaded. Saving now stores the empty feed.
+              </>
+            )
+          }
+          confirmLabel="Save empty feed"
+          cancelLabel="Cancel"
+          danger
+          onCancel={() => setShowEmptySaveConfirm(false)}
+          onConfirm={async () => {
+            setShowEmptySaveConfirm(false);
+            await runSave();
+          }}
+        />
+      )}
 
       {showResetConfirm && (
         <ConfirmDialog

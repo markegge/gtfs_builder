@@ -80,6 +80,23 @@ describe('first-run funnel beacons', () => {
     ]);
   });
 
+  // `empty` (the feed genuinely has no routes) and `missing` (its stored blob
+  // is GONE) used to be the same label, which meant real data loss was filed
+  // under "user picked one of their own empty feeds" and never looked at.
+  it('separates a lost blob from a merely empty feed', () => {
+    trackFeedImportFailed('myfeeds', 'empty');
+    trackFeedImportFailed('myfeeds', 'missing');
+    // Opening a saved feed to a blank canvas is a FAILURE, not a feed_opened.
+    trackFeedImportFailed('saved_project', 'empty');
+    trackFeedImportFailed('saved_project', 'missing');
+    expect(bodies().map((b) => b.label)).toEqual([
+      'myfeeds:empty',
+      'myfeeds:missing',
+      'saved_project:empty',
+      'saved_project:missing',
+    ]);
+  });
+
   it('sends feed_edited at most once per tab session', () => {
     trackFirstFeedEdit('stops');
     trackFirstFeedEdit('routes');
