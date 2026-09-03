@@ -40,6 +40,12 @@ export interface EmbedStrings {
   scheduleInEffect: (label: string) => string;
   scheduleExpired: (days: number) => string;
   scheduleExpiresIn: (days: number, date: string) => string;
+  // Per-pattern expiry (#71): the banner on an ended pattern, the note that
+  // says one was hidden, the link that reveals it, and the tab marker.
+  serviceEnded: (date: string) => string;
+  pastServiceHidden: string;
+  showAllServices: string;
+  endedLabel: string;
   serviceDay: string;
   stopIdLabel: string;
   routeCount: (n: number) => string;
@@ -68,6 +74,10 @@ const EN: EmbedStrings = {
   scheduleInEffect: (label) => `${label} schedule in effect`,
   scheduleExpired: (days) => `Schedule expired ${days} day${days === 1 ? '' : 's'} ago.`,
   scheduleExpiresIn: (days, date) => `Schedule expires in ${days} day${days === 1 ? '' : 's'} (${date}).`,
+  serviceEnded: (date) => `This schedule ended on ${date}.`,
+  pastServiceHidden: 'Past service patterns are hidden.',
+  showAllServices: 'Show all',
+  endedLabel: 'ended',
   serviceDay: 'Service day',
   stopIdLabel: 'Stop ID',
   routeCount: (n) => `${n} route${n === 1 ? '' : 's'}`,
@@ -94,6 +104,10 @@ const ES: EmbedStrings = {
   scheduleInEffect: (label) => `Horario ${label} en vigor`,
   scheduleExpired: (days) => `El horario venció hace ${days} día${days === 1 ? '' : 's'}.`,
   scheduleExpiresIn: (days, date) => `El horario vence en ${days} día${days === 1 ? '' : 's'} (${date}).`,
+  serviceEnded: (date) => `Este horario finalizó el ${date}.`,
+  pastServiceHidden: 'Los horarios finalizados están ocultos.',
+  showAllServices: 'Mostrar todos',
+  endedLabel: 'finalizado',
   serviceDay: 'Día de servicio',
   stopIdLabel: 'ID de parada',
   routeCount: (n) => `${n} ruta${n === 1 ? '' : 's'}`,
@@ -120,6 +134,10 @@ const FR: EmbedStrings = {
   scheduleInEffect: (label) => `Horaire ${label} en vigueur`,
   scheduleExpired: (days) => `Horaire expiré il y a ${days} jour${days === 1 ? '' : 's'}.`,
   scheduleExpiresIn: (days, date) => `Horaire expire dans ${days} jour${days === 1 ? '' : 's'} (${date}).`,
+  serviceEnded: (date) => `Cet horaire a pris fin le ${date}.`,
+  pastServiceHidden: 'Les horaires terminés sont masqués.',
+  showAllServices: 'Tout afficher',
+  endedLabel: 'terminé',
   serviceDay: 'Jour de service',
   stopIdLabel: 'Arrêt n°',
   routeCount: (n) => `${n} ligne${n === 1 ? '' : 's'}`,
@@ -146,6 +164,10 @@ const DE: EmbedStrings = {
   scheduleInEffect: (label) => `Fahrplan ${label} in Kraft`,
   scheduleExpired: (days) => `Fahrplan vor ${days} Tag${days === 1 ? '' : 'en'} abgelaufen.`,
   scheduleExpiresIn: (days, date) => `Fahrplan läuft in ${days} Tag${days === 1 ? '' : 'en'} ab (${date}).`,
+  serviceEnded: (date) => `Dieser Fahrplan endete am ${date}.`,
+  pastServiceHidden: 'Beendete Fahrpläne sind ausgeblendet.',
+  showAllServices: 'Alle anzeigen',
+  endedLabel: 'beendet',
   serviceDay: 'Verkehrstag',
   stopIdLabel: 'Haltestellen-ID',
   routeCount: (n) => `${n} Linie${n === 1 ? '' : 'n'}`,
@@ -172,6 +194,10 @@ const PT: EmbedStrings = {
   scheduleInEffect: (label) => `Horário ${label} em vigor`,
   scheduleExpired: (days) => `O horário expirou há ${days} dia${days === 1 ? '' : 's'}.`,
   scheduleExpiresIn: (days, date) => `O horário expira em ${days} dia${days === 1 ? '' : 's'} (${date}).`,
+  serviceEnded: (date) => `Este horário terminou em ${date}.`,
+  pastServiceHidden: 'Os horários encerrados estão ocultos.',
+  showAllServices: 'Mostrar todos',
+  endedLabel: 'encerrado',
   serviceDay: 'Dia de serviço',
   stopIdLabel: 'ID da parada',
   routeCount: (n) => `${n} linha${n === 1 ? '' : 's'}`,

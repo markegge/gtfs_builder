@@ -109,6 +109,20 @@ describe('buildServiceProfiles', () => {
     expect(buildServiceProfiles([])).toEqual([]);
   });
 
+  it('carries the profile’s end_date, which is what expiry is judged on', () => {
+    // Profiles split on the date range, so every row in one shares an end_date
+    // and there is exactly one answer. worker/embeds/services.ts compares it
+    // against the agency's today to decide whether a rider sees the pattern.
+    const profiles = buildServiceProfiles([
+      cal('SUMMER', WEEKDAY, '20260601', '20260831'),
+      cal('SUMMER2', WEEKDAY, '20260601', '20260831'),
+      cal('WINTER', WEEKDAY, '20260901', '20270531'),
+    ]);
+    const byEnd = profiles.map((p) => [p.serviceIds, p.endDate]);
+    expect(byEnd).toContainEqual([['SUMMER', 'SUMMER2'], '20260831']);
+    expect(byEnd).toContainEqual([['WINTER'], '20270531']);
+  });
+
   // ─── The id contract ──────────────────────────────────────────────────────
 
   it('produces the exact documented id for a known calendar (golden values)', () => {

@@ -212,6 +212,20 @@ const STYLES = `
     color: var(--brand-deep);
     font-weight: 700;
   }
+  /* An expired pattern, when one is on show (#71) — legible, but visibly not
+     the schedule a rider should be planning around. */
+  .service-tabs a.expired { color: #8a7a6a; font-style: italic; }
+  .service-tabs a.expired.active { color: var(--brand-deep); }
+  /* The one-line note under the tabs saying some patterns were hidden, plus its
+     reveal link. Deliberately quiet: it is for the rider who wonders, not the
+     rider who is looking up a departure time. */
+  .service-note {
+    font-size: 12px;
+    color: #6b6b6b;
+    margin: -4px 0 12px;
+  }
+  .service-note a { color: var(--brand-deep); }
+
   /* Flush left so it lines up with the header beneath it. */
   .embed-nav a {
     display: inline-flex;

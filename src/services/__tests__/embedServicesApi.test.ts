@@ -44,15 +44,35 @@ describe('fetchEmbedServiceProfiles', () => {
   it('maps the wire shape onto the shared ServiceProfile fields', async () => {
     stubFetch(200, {
       services: [
-        { id: 'svc-1rbulw', label: 'Weekday', service_ids: ['WKDY'], route_ids: ['R1', 'R2'] },
-        { id: 'svc-1rnwq6', label: 'Saturday', service_ids: ['SAT'], route_ids: ['R1'] },
+        { id: 'svc-1rbulw', label: 'Weekday', service_ids: ['WKDY'], route_ids: ['R1', 'R2'], end_date: '20261231', expired: false },
+        { id: 'svc-1rnwq6', label: 'Saturday', service_ids: ['SAT'], route_ids: ['R1'], end_date: '20260607', expired: true },
       ],
     });
     const profiles = await fetchEmbedServiceProfiles('https://feeds.gtfsx.com', 'my-agency');
     expect(profiles).toEqual([
-      { id: 'svc-1rbulw', label: 'Weekday', serviceIds: ['WKDY'], routeIds: ['R1', 'R2'] },
-      { id: 'svc-1rnwq6', label: 'Saturday', serviceIds: ['SAT'], routeIds: ['R1'] },
+      { id: 'svc-1rbulw', label: 'Weekday', serviceIds: ['WKDY'], routeIds: ['R1', 'R2'], endDate: '20261231', expired: false },
+      { id: 'svc-1rnwq6', label: 'Saturday', serviceIds: ['SAT'], routeIds: ['R1'], endDate: '20260607', expired: true },
     ]);
+  });
+
+  it('treats a server that omits the expiry fields as "nothing has expired"', async () => {
+    // The picker marks expired patterns and warns when one is pinned. A feeds
+    // origin running an older build sends neither field; reading that as
+    // `expired` would put an "ended" label on every live pattern an agency has.
+    stubFetch(200, {
+      services: [{ id: 'svc-x', label: 'Weekday', service_ids: ['WKDY'], route_ids: ['R1'] }],
+    });
+    const [profile] = await fetchEmbedServiceProfiles('https://feeds.gtfsx.com', 's');
+    expect(profile.expired).toBe(false);
+    expect(profile.endDate).toBe('');
+  });
+
+  it('does not treat a truthy non-boolean `expired` as expired', async () => {
+    stubFetch(200, {
+      services: [{ id: 'svc-x', label: 'Weekday', expired: 'no' as unknown as boolean }],
+    });
+    const [profile] = await fetchEmbedServiceProfiles('https://feeds.gtfsx.com', 's');
+    expect(profile.expired).toBe(false);
   });
 
   it('preserves the server’s profile order', async () => {

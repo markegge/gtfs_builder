@@ -107,6 +107,8 @@ const DARK_CSS = `
   table.schedule .stop-name { color: #f2ece3; border-right-color: #3a2f22; }
   .service-tabs, .embed-nav { border-bottom-color: #3a2f22; }
   .service-tabs a, .embed-nav a { color: #e7ddcd; }
+  .service-tabs a.expired { color: #a2947f; }
+  .service-note { color: #b8ac9b; }
   .route-list a { color: #f2ece3; }
   .route-list a:hover { background: #241d15; }
   .dep-time, .dep-route, .dep-headsign { color: #f2ece3; }

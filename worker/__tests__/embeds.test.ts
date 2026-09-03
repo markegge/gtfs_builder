@@ -154,6 +154,107 @@ function makeDayPatternState(): SnapshotState {
   };
 }
 
+/**
+ * A YYYYMMDD date `days` from now, read in the fixture agency's timezone
+ * (America/Denver) — the same clock `todayInTimezone` uses. Relative rather
+ * than hard-coded so an "expired" fixture stays expired, and a live one stays
+ * live, however long after this was written the suite runs.
+ */
+function ymdFromNow(days: number): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Denver',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+    .format(new Date(Date.now() + days * 86_400_000))
+    .replace(/-/g, '');
+}
+
+/** Departure time unique to the expired seasonal pattern below. */
+const SEASONAL_ONLY_TIME = '5:33p';
+/** Departure time unique to the live all-week pattern below. */
+const LIVE_ONLY_TIME = '9:09a';
+
+/**
+ * A live all-week pattern plus a seasonal Sat+Sun one that ended a month ago —
+ * the `cat` (Columbia Area Transit) shape from issue #71, where a discontinued
+ * Dog Mountain shuttle kept its own tab and full timetable.
+ *
+ * feed_end_date is deliberately a year out, so the feed-level
+ * `renderExpiryWarning` stays silent and anything the page says about the
+ * expired pattern has to come from the per-profile check.
+ */
+function makeExpiredSeasonalState(): SnapshotState {
+  const base = makeFeedState();
+  return {
+    ...base,
+    feedInfo: {
+      feed_publisher_name: 'EmbedAgency',
+      feed_start_date: ymdFromNow(-365),
+      feed_end_date: ymdFromNow(365),
+    },
+    calendars: [
+      { service_id: 'LIVE', monday: 1, tuesday: 1, wednesday: 1, thursday: 1, friday: 1, saturday: 1, sunday: 1, start_date: ymdFromNow(-365), end_date: ymdFromNow(365) },
+      { service_id: 'SEASON', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 0, saturday: 1, sunday: 1, start_date: ymdFromNow(-120), end_date: ymdFromNow(-30) },
+    ],
+    calendarDates: [],
+    trips: [
+      { trip_id: 'lv1', route_id: 'R1', service_id: 'LIVE', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+      { trip_id: 'sn1', route_id: 'R1', service_id: 'SEASON', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Dog Mountain' },
+    ],
+    stopTimes: [
+      { trip_id: 'lv1', arrival_time: '09:09:00', departure_time: '09:09:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'lv1', arrival_time: '09:19:00', departure_time: '09:19:00', stop_id: 's2', stop_sequence: 2 },
+      { trip_id: 'sn1', arrival_time: '17:33:00', departure_time: '17:33:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'sn1', arrival_time: '17:43:00', departure_time: '17:43:00', stop_id: 's2', stop_sequence: 2 },
+    ],
+  };
+}
+
+/** Same two patterns, but both ended — nothing left to fall back to. */
+function makeAllExpiredState(): SnapshotState {
+  const base = makeExpiredSeasonalState();
+  return {
+    ...base,
+    calendars: [
+      { ...base.calendars[0], start_date: ymdFromNow(-365), end_date: ymdFromNow(-45) },
+      base.calendars[1],
+    ],
+  };
+}
+
+/**
+ * A feed whose *first-ranked* pattern is the expired one, on a day when nothing
+ * at all is running: the live pattern is suppressed today by a
+ * calendar_dates exception, so no profile intersects today's services and the
+ * default falls through to profile order — which puts "Weekday" ahead of
+ * "Daily". Without an expiry-aware default the rider opens on a schedule that
+ * stopped running two months ago.
+ *
+ * The exception is what makes this day-independent: a fixture that relied on
+ * "today is a Sunday" would prove nothing six days in seven.
+ */
+function makeExpiredDefaultState(): SnapshotState {
+  const base = makeExpiredSeasonalState();
+  return {
+    ...base,
+    calendars: [
+      { service_id: 'OLDWK', monday: 1, tuesday: 1, wednesday: 1, thursday: 1, friday: 1, saturday: 0, sunday: 0, start_date: ymdFromNow(-400), end_date: ymdFromNow(-60) },
+      { service_id: 'LIVE', monday: 1, tuesday: 1, wednesday: 1, thursday: 1, friday: 1, saturday: 1, sunday: 1, start_date: ymdFromNow(-400), end_date: ymdFromNow(400) },
+    ],
+    calendarDates: [{ service_id: 'LIVE', date: ymdFromNow(0), exception_type: 2 }],
+    trips: [
+      { trip_id: 'ow1', route_id: 'R1', service_id: 'OLDWK', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+      { trip_id: 'lv1', route_id: 'R1', service_id: 'LIVE', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+    ],
+    stopTimes: [
+      { trip_id: 'ow1', arrival_time: '17:33:00', departure_time: '17:33:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'lv1', arrival_time: '09:09:00', departure_time: '09:09:00', stop_id: 's1', stop_sequence: 1 },
+    ],
+  };
+}
+
 async function createPublishedProject(
   client: TestClient,
   name: string,
@@ -405,6 +506,171 @@ describe('embed routes', () => {
     // pre-existing rule, deliberately unchanged by the relabelling.
     const profiles = await serviceProfiles(slug);
     expect(profiles.map((p) => p.label)).toEqual(['Fri', 'Mon–Sat', 'Weekend']);
+  });
+
+  // ─── Expired service patterns (issue #71) ──────────────────────────────────
+  //
+  // A pattern whose calendar.txt date range has already ended is not a schedule
+  // any more, but the embed rendered it as one: a clickable tab backed by a
+  // full timetable, with nothing to say the service is over. `renderExpiryWarning`
+  // never caught it — it reads feed_info.feed_end_date, which on the reported
+  // feed was still a year out.
+  //
+  // Riders don't see expired patterns; operators still do (see the API test at
+  // the end of this block). Every fixture here keeps feed_end_date in the future
+  // so the feed-level warning stays silent and the per-profile check is what's
+  // under test.
+  describe('expired service patterns', () => {
+    /** The catalogue as an integrator sees it, including the expiry fields. */
+    async function servicesApi(slug: string) {
+      const res = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1/services`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        services: { id: string; label: string; end_date?: string; expired?: boolean }[];
+      };
+      return body.services;
+    }
+
+    it('hides an expired pattern from the rider’s tabs, and says it did', async () => {
+      const client = await loggedInClient('emb-exp-hide@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpHide', makeExpiredSeasonalState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`)
+      ).text();
+
+      // The live pattern's timetable is what a rider gets; the ended one is
+      // gone from the page entirely — no tab, marked or otherwise. (With one
+      // pattern left there is nothing to switch between, so the tab row itself
+      // drops out; the today-banner already names the schedule in force.)
+      expect(html).toContain(LIVE_ONLY_TIME);
+      expect(html).not.toContain('Weekend');
+      expect(html).not.toContain(SEASONAL_ONLY_TIME);
+      // Dropping a tab silently would be its own small lie — the page says a
+      // pattern was hidden and offers the way to see it.
+      expect(html).toContain('Past service patterns are hidden');
+      expect(html).toContain('show_expired=1');
+    });
+
+    it('?show_expired=1 brings the expired pattern back, marked as ended', async () => {
+      const client = await loggedInClient('emb-exp-show@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpShow', makeExpiredSeasonalState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?show_expired=1`)
+      ).text();
+
+      expect(html).toContain('Weekend (ended)');
+      expect(html).toContain('>Daily</a>');
+      // Nothing left to hide, so the note retires with it.
+      expect(html).not.toContain('Past service patterns are hidden');
+    });
+
+    it('shows every pattern, plus a warning, when all of them have expired', async () => {
+      const client = await loggedInClient('emb-exp-all@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpAll', makeAllExpiredState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`)
+      ).text();
+
+      // Hiding everything would leave a rider with an empty page, so both tabs
+      // render — and the selected one carries the notice.
+      expect(html).toContain('Daily (ended)');
+      expect(html).toContain('Weekend (ended)');
+      expect(html).toContain('This schedule ended on');
+      expect(html).not.toContain('Past service patterns are hidden');
+      // The feed as a whole has NOT expired, so the feed-level banner is silent
+      // and this warning is the only thing telling the rider.
+      expect(html).not.toContain('Schedule expired');
+    });
+
+    it('honours an explicit ?service= pin at an expired pattern, with the warning', async () => {
+      const client = await loggedInClient('emb-exp-pin@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpPin', makeExpiredSeasonalState());
+
+      const profiles = await servicesApi(slug);
+      const seasonal = profiles.find((p) => p.label === 'Weekend');
+      expect(seasonal).toBeTruthy();
+
+      const html = await (
+        await SELF.fetch(
+          `http://feeds.example.com/${slug}/embed/route/R1?service=${encodeURIComponent(seasonal!.id)}`,
+        )
+      ).text();
+
+      // Someone has this URL pinned in a page: render what they asked for
+      // rather than silently substituting today's service…
+      expect(html).toContain(SEASONAL_ONLY_TIME);
+      expect(html).not.toContain(LIVE_ONLY_TIME);
+      // …and tell them it's over.
+      expect(html).toContain('This schedule ended on');
+      // Its tab is visible (it's the selected one) and marked.
+      expect(html).toContain('Weekend (ended)');
+    });
+
+    it('picks a live pattern as the default even when an expired one sorts first', async () => {
+      const client = await loggedInClient('emb-exp-default@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpDefault', makeExpiredDefaultState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`)
+      ).text();
+
+      // The live pattern's departures, not the two-month-dead one's.
+      expect(html).toContain(LIVE_ONLY_TIME);
+      expect(html).not.toContain(SEASONAL_ONLY_TIME);
+      expect(html).not.toContain('This schedule ended on');
+    });
+
+    it('publishes expired patterns to the operator API instead of hiding them', async () => {
+      const client = await loggedInClient('emb-exp-api@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpApi', makeExpiredSeasonalState());
+
+      const profiles = await servicesApi(slug);
+      // Deliberately asymmetric with the embed above: an agency pinning a
+      // seasonal pattern needs to see it before its season, and needs to be
+      // able to tell why one vanished from the rider page.
+      expect(profiles.map((p) => p.label)).toEqual(['Daily', 'Weekend']);
+      const live = profiles.find((p) => p.label === 'Daily');
+      const seasonal = profiles.find((p) => p.label === 'Weekend');
+      expect(live?.expired).toBe(false);
+      expect(seasonal?.expired).toBe(true);
+      // …and the date it was judged on, so the picker can label it.
+      expect(seasonal?.end_date).toBe(ymdFromNow(-30));
+      expect(live?.end_date).toBe(ymdFromNow(365));
+    });
+
+    it('caches the hidden and shown variants apart', async () => {
+      const client = await loggedInClient('emb-exp-etag@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpEtag', makeExpiredSeasonalState());
+      const base = `http://feeds.example.com/${slug}/embed/route/R1`;
+
+      const hidden = await SELF.fetch(base);
+      const shown = await SELF.fetch(`${base}?show_expired=1`);
+      const hiddenTag = hidden.headers.get('ETag');
+      expect(hiddenTag).toBeTruthy();
+      expect(shown.headers.get('ETag')).not.toBe(hiddenTag);
+
+      // An edge cache holding the hidden variant must not answer the shown one.
+      const cross = await SELF.fetch(`${base}?show_expired=1`, {
+        headers: { 'If-None-Match': hiddenTag as string },
+      });
+      expect(cross.status).toBe(200);
+      expect(await cross.text()).toContain('Weekend (ended)');
+    });
+
+    it('localizes the hidden-pattern note and the ended warning (es)', async () => {
+      const client = await loggedInClient('emb-exp-i18n@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpI18n', makeAllExpiredState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?lang=es`)
+      ).text();
+      expect(html).toContain('Este horario finalizó el');
+      expect(html).toContain('(finalizado)');
+      expect(html).not.toContain('This schedule ended on');
+    });
   });
 
   it('GET /widgets.js serves the web-component loader (origin-level, no slug)', async () => {

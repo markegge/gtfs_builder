@@ -8,6 +8,7 @@ import {
   activeServicesOn,
   buildServiceProfiles,
   dayOfWeekInTimezone,
+  expiredProfileIds,
   pickDefaultProfile,
   todayInTimezone,
   type ServiceProfile,
@@ -49,37 +50,85 @@ export async function renderRouteEmbed(
   );
   const variant = `${themeCacheKey(theme)}-${lang}`;
 
+  const agency = agency0;
+  const tz = agency?.agency_timezone;
+  const now = new Date();
+  // "Today" is the agency's today, never the server's — the same clock the
+  // default-tab picker runs on.
+  const today = todayInTimezone(tz, now);
+  const dow = dayOfWeekInTimezone(tz, now);
+
+  // Expired service patterns are hidden from riders unless explicitly asked
+  // for (#71). Both the request for them and the date they're judged against
+  // are part of the cache key: `show_expired` because it's a different tab set,
+  // and `today` because that tab set changes at midnight — without it a client
+  // revalidating with yesterday's ETag would be told its copy is still fresh.
+  const showExpiredParam = ['1', 'true', 'yes'].includes(
+    (url.searchParams.get('show_expired') ?? '').trim().toLowerCase(),
+  );
+
   const ifNoneMatch = request.headers.get('If-None-Match');
-  const etagBase = `"${feed.snapshotId}-${routeId}-${requestedTab ?? 'auto'}-${view}-${variant}"`;
+  const etagBase = `"${feed.snapshotId}-${routeId}-${requestedTab ?? 'auto'}-${view}-${variant}-${today}${
+    showExpiredParam ? '-all' : ''
+  }"`;
   if (ifNoneMatch && ifNoneMatch.includes(etagBase)) {
     const headers = embedHeaders(feed.snapshotId, feed.publishedAt);
     headers.set('ETag', etagBase);
     return new Response(null, { status: 304, headers });
   }
 
-  const agency = agency0;
-  const tz = agency?.agency_timezone;
-  const now = new Date();
-  const today = todayInTimezone(tz, now);
-  const dow = dayOfWeekInTimezone(tz, now);
   const activeToday = activeServicesOn(today, dow, feed.state.calendars, feed.state.calendarDates);
 
   const profiles = buildServiceProfiles(feed.state.calendars);
-  const defaultProfile = pickDefaultProfile(profiles, activeToday);
+  const expired = expiredProfileIds(profiles, feed.state.calendarDates, today);
+  // Hiding is for feeds that still have something to show. When *every* pattern
+  // has ended, hiding them all would leave a rider on an empty page with no
+  // explanation — so show them, and let the warning do the work.
+  const allExpired = profiles.length > 0 && expired.size === profiles.length;
+  const showExpired = showExpiredParam || allExpired;
+
+  const defaultProfile = pickDefaultProfile(profiles, activeToday, expired);
 
   let selected: ServiceProfile | null = null;
+  // An explicit `?service=` resolves against ALL profiles, expired included.
+  // Someone has that URL pinned into a live page; showing them what it actually
+  // points at — with the notice on it — beats silently substituting a different
+  // schedule, which is how this class of bug stays invisible.
   if (requestedTab) selected = profiles.find((p) => p.id === requestedTab) ?? null;
   if (!selected) selected = defaultProfile;
+
+  // Tabs a rider can reach: the live patterns, the expired ones when asked for
+  // (or when that's all there is), and whatever is selected — a selected tab
+  // missing from its own tab row reads as a broken page.
+  const visibleProfiles = profiles.filter(
+    (p) => showExpired || !expired.has(p.id) || p.id === selected?.id,
+  );
+  const hiddenCount = profiles.length - visibleProfiles.length;
 
   const mapData = buildRouteMapData(route, feed.state, slug);
   const map = renderMap(mapData, env.MAPBOX_TOKEN);
 
-  const tabs = profiles.map((p) => {
+  const tabs = visibleProfiles.map((p) => {
     const active = selected && p.id === selected.id;
+    const isExpired = expired.has(p.id);
     const params = new URLSearchParams(url.search);
     params.set('service', p.id);
-    return html`<a href="?${params.toString()}" class="${active ? 'active' : ''}">${p.label}</a>`;
+    const cls = `${active ? 'active' : ''}${isExpired ? ' expired' : ''}`.trim();
+    const label = isExpired ? `${p.label} (${t.endedLabel})` : p.label;
+    return html`<a href="?${params.toString()}" class="${cls}">${label}</a>`;
   });
+
+  // Showing fewer tabs without saying so is its own small lie — and it hides a
+  // publishing mistake from the operator as effectively as it hides a dead
+  // schedule from the rider. One quiet line, and the link that reveals them.
+  const showAllParams = new URLSearchParams(url.search);
+  showAllParams.set('show_expired', '1');
+  const hiddenNote =
+    hiddenCount > 0
+      ? html`<p class="service-note">
+          ${t.pastServiceHidden} <a href="?${showAllParams.toString()}">${t.showAllServices}</a>
+        </p>`
+      : '';
 
   const schedule = selected
     ? renderScheduleTables(route, new Set(selected.serviceIds), feed.state)
@@ -90,6 +139,19 @@ export async function renderRouteEmbed(
 
   // Expiry warning — only when within 14d of feed_end_date or already past.
   const expiryWarning = renderExpiryWarning(feed.state.feedInfo?.feed_end_date, today, t);
+
+  // Per-pattern warning, for the selected pattern only. Suppressed when the
+  // feed-level banner is already announcing that the whole schedule expired:
+  // two near-identical alerts stacked on one page teaches riders to skip both.
+  const endedWarning =
+    selected && expired.has(selected.id) && !isFeedExpired(feed.state.feedInfo?.feed_end_date, today)
+      ? html`
+          <div class="expiry-warning expired" role="alert">
+            <span>⚠</span>
+            <span>${t.serviceEnded(formatYmd(selected.endDate))}</span>
+          </div>
+        `
+      : '';
 
   // Per-view impression beacon (kind depends on the section served).
   const beaconKind = view === 'map' ? 'route' : view === 'schedule' ? 'schedule' : 'route';
@@ -129,9 +191,11 @@ export async function renderRouteEmbed(
     </header>
   `;
   const scheduleSection = html`
-    ${profiles.length > 1
+    ${visibleProfiles.length > 1
       ? html`<nav class="service-tabs" aria-label="${t.serviceDay}">${tabs}</nav>`
       : ''}
+    ${hiddenNote}
+    ${endedWarning}
     ${schedule}
   `;
 
@@ -214,6 +278,17 @@ function renderTodayBanner(
       </span>
     </div>
   `;
+}
+
+/**
+ * True when the whole feed is past its `feed_info.feed_end_date` — i.e. when
+ * renderExpiryWarning is rendering its `expired` variant. Kept next to it so
+ * the two can't drift into disagreeing about what "expired" means.
+ */
+function isFeedExpired(feedEndDate: string | undefined, today: string): boolean {
+  if (!feedEndDate) return false;
+  const days = daysBetweenYmd(today, feedEndDate);
+  return days !== null && days < 0;
 }
 
 export function renderExpiryWarning(feedEndDate: string | undefined, today: string, t?: EmbedStrings) {
