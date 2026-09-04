@@ -1121,6 +1121,71 @@ describe('embed routes', () => {
       expect(one).not.toContain('4:16p');
     });
 
+    it('scopes tabs to exactly the profiles the API lists for that route', async () => {
+      const client = await loggedInClient('emb-dp-parity@example.com');
+      // Two routes with overlapping-but-different pattern sets, so "same as the
+      // API" is a real claim: dropping the filter, or hard-coding it to the
+      // wrong route, changes one of these two lists.
+      const start = ymdFromNow(-30);
+      const end = ymdFromNow(300);
+      const cal = (id: string, days: number[]) => ({
+        service_id: id,
+        monday: days[1] as 0 | 1, tuesday: days[2] as 0 | 1, wednesday: days[3] as 0 | 1,
+        thursday: days[4] as 0 | 1, friday: days[5] as 0 | 1, saturday: days[6] as 0 | 1,
+        sunday: days[0] as 0 | 1,
+        start_date: start, end_date: end,
+      });
+      const state: SnapshotState = {
+        ...makeFeedState(),
+        feedInfo: { feed_publisher_name: 'EmbedAgency', feed_start_date: start, feed_end_date: end },
+        routes: [
+          ...makeFeedState().routes,
+          { route_id: 'R2', agency_id: 'a1', route_short_name: '2', route_long_name: 'Lakeside', route_type: 3, route_color: '2980b9', route_text_color: 'ffffff' },
+        ],
+        calendars: [
+          cal('WKDY', [0, 1, 1, 1, 1, 1, 0]),
+          cal('SAT', [0, 0, 0, 0, 0, 0, 1]),
+          cal('SUN', [1, 0, 0, 0, 0, 0, 0]),
+        ],
+        calendarDates: [],
+        trips: [
+          { trip_id: 'a1t', route_id: 'R1', service_id: 'WKDY', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+          { trip_id: 'a2t', route_id: 'R1', service_id: 'SAT', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+          { trip_id: 'b1t', route_id: 'R2', service_id: 'SAT', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Lakeside' },
+          { trip_id: 'b2t', route_id: 'R2', service_id: 'SUN', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Lakeside' },
+        ],
+        stopTimes: ['a1t', 'a2t', 'b1t', 'b2t'].map((id) => ({
+          trip_id: id, arrival_time: '09:00:00', departure_time: '09:00:00', stop_id: 's1', stop_sequence: 1,
+        })),
+      };
+      const { slug } = await createPublishedProject(client, 'EmbedDpParity', state);
+
+      const res = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1/services`);
+      const body = (await res.json()) as {
+        services: { label: string; route_ids: string[] }[];
+      };
+
+      // api.ts documents route_ids as existing "so a caller can offer only the
+      // patterns that mean something for a given route". route.ts is that
+      // caller; this asserts it stayed that caller.
+      for (const routeId of ['R1', 'R2']) {
+        const html = await get(
+          `http://feeds.example.com/${slug}/embed/route/${routeId}?show_services=1`,
+        );
+        for (const svc of body.services) {
+          const tab = `>${svc.label}</a>`;
+          if (svc.route_ids.includes(routeId)) expect(html).toContain(tab);
+          else expect(html).not.toContain(tab);
+        }
+      }
+
+      // Guards the guard: the two routes really do differ, so a filter that
+      // returned everything (or nothing) can't satisfy the loop above.
+      expect(body.services.find((s) => s.label === 'Weekday')?.route_ids).toEqual(['R1']);
+      expect(body.services.find((s) => s.label === 'Sunday')?.route_ids).toEqual(['R2']);
+      expect(body.services.find((s) => s.label === 'Saturday')?.route_ids).toEqual(['R1', 'R2']);
+    });
+
     it('still honours a ?service= pin at a pattern the route does not run', async () => {
       const { slug } = await routeScopedProject('emb-dp-rs-pin@example.com', 'EmbedDpRsPin');
 
