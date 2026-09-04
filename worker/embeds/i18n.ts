@@ -46,6 +46,19 @@ export interface EmbedStrings {
   pastServiceHidden: string;
   showAllServices: string;
   endedLabel: string;
+  // Rider-facing date picker (#73). The control that replaced the service-day
+  // tabs: `showScheduleForDate` labels the input for screen readers, `go`
+  // submits it, and the other three are the answers a chosen date can get when
+  // it isn't a timetable.
+  //
+  // The date itself is never a string here — it's formatted with
+  // Intl.DateTimeFormat in the request's language (worker/embeds/route.ts), so
+  // weekday and month names localize without five hand-written month tables.
+  showScheduleForDate: string;
+  go: string;
+  noServiceOnDate: string;
+  nextServiceOn: (date: string) => string;
+  scheduleCovers: (start: string, end: string) => string;
   serviceDay: string;
   stopIdLabel: string;
   routeCount: (n: number) => string;
@@ -78,6 +91,11 @@ const EN: EmbedStrings = {
   pastServiceHidden: 'Past service patterns are hidden.',
   showAllServices: 'Show all',
   endedLabel: 'ended',
+  showScheduleForDate: 'Show the schedule for a date',
+  go: 'Go',
+  noServiceOnDate: 'No service on this date.',
+  nextServiceOn: (date) => `Next service: ${date}`,
+  scheduleCovers: (start, end) => `This schedule covers ${start} – ${end}.`,
   serviceDay: 'Service day',
   stopIdLabel: 'Stop ID',
   routeCount: (n) => `${n} route${n === 1 ? '' : 's'}`,
@@ -108,6 +126,11 @@ const ES: EmbedStrings = {
   pastServiceHidden: 'Los horarios finalizados están ocultos.',
   showAllServices: 'Mostrar todos',
   endedLabel: 'finalizado',
+  showScheduleForDate: 'Ver el horario de una fecha',
+  go: 'Ir',
+  noServiceOnDate: 'Sin servicio en esta fecha.',
+  nextServiceOn: (date) => `Próximo servicio: ${date}`,
+  scheduleCovers: (start, end) => `Este horario cubre del ${start} al ${end}.`,
   serviceDay: 'Día de servicio',
   stopIdLabel: 'ID de parada',
   routeCount: (n) => `${n} ruta${n === 1 ? '' : 's'}`,
@@ -138,6 +161,11 @@ const FR: EmbedStrings = {
   pastServiceHidden: 'Les horaires terminés sont masqués.',
   showAllServices: 'Tout afficher',
   endedLabel: 'terminé',
+  showScheduleForDate: 'Afficher l’horaire d’une date',
+  go: 'Valider',
+  noServiceOnDate: 'Pas de service à cette date.',
+  nextServiceOn: (date) => `Prochain service : ${date}`,
+  scheduleCovers: (start, end) => `Cet horaire couvre du ${start} au ${end}.`,
   serviceDay: 'Jour de service',
   stopIdLabel: 'Arrêt n°',
   routeCount: (n) => `${n} ligne${n === 1 ? '' : 's'}`,
@@ -168,6 +196,11 @@ const DE: EmbedStrings = {
   pastServiceHidden: 'Beendete Fahrpläne sind ausgeblendet.',
   showAllServices: 'Alle anzeigen',
   endedLabel: 'beendet',
+  showScheduleForDate: 'Fahrplan für ein Datum anzeigen',
+  go: 'Anzeigen',
+  noServiceOnDate: 'An diesem Tag kein Service.',
+  nextServiceOn: (date) => `Nächster Verkehrstag: ${date}`,
+  scheduleCovers: (start, end) => `Dieser Fahrplan gilt vom ${start} bis zum ${end}.`,
   serviceDay: 'Verkehrstag',
   stopIdLabel: 'Haltestellen-ID',
   routeCount: (n) => `${n} Linie${n === 1 ? '' : 'n'}`,
@@ -198,6 +231,11 @@ const PT: EmbedStrings = {
   pastServiceHidden: 'Os horários encerrados estão ocultos.',
   showAllServices: 'Mostrar todos',
   endedLabel: 'encerrado',
+  showScheduleForDate: 'Ver o horário de uma data',
+  go: 'Ir',
+  noServiceOnDate: 'Sem serviço nesta data.',
+  nextServiceOn: (date) => `Próximo serviço: ${date}`,
+  scheduleCovers: (start, end) => `Este horário abrange de ${start} a ${end}.`,
   serviceDay: 'Dia de serviço',
   stopIdLabel: 'ID da parada',
   routeCount: (n) => `${n} linha${n === 1 ? '' : 's'}`,

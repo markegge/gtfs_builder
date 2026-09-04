@@ -124,6 +124,48 @@ const STYLES = `
   .today-banner.muted .dot { background: #b88a4a; }
   .today-banner strong { font-weight: 600; }
   .today-banner .sep { color: #b88a4a; }
+  /* The date picker sits inside the today-banner, at its trailing edge, so it
+     reads as a refinement of "showing this day's schedule" rather than a form
+     bolted underneath one. margin-left:auto pushes it right on a wide embed;
+     flex-wrap on the banner lets it drop to its own line on a narrow one
+     instead of squeezing the sentence. */
+  .today-banner { flex-wrap: wrap; }
+  .date-picker {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+  .date-picker input[type='date'] {
+    font: inherit;
+    font-size: 12px;
+    color: #5a4525;
+    background: #fffdf8;
+    border: 1px solid #e0cba8;
+    border-radius: 4px;
+    padding: 2px 6px;
+    /* iOS Safari stretches a date input to a fixed intrinsic width and adds
+       inner shadow; both make it read as a heavyweight form field. */
+    -webkit-appearance: none;
+    appearance: none;
+    min-height: 24px;
+  }
+  .date-picker button {
+    font: inherit;
+    font-size: 12px;
+    color: var(--brand-deep);
+    background: transparent;
+    border: 1px solid #e0cba8;
+    border-radius: 4px;
+    padding: 2px 8px;
+    min-height: 24px;
+    cursor: pointer;
+  }
+  .date-picker button:hover { background: #fdf3e3; }
+  /* The answers a chosen date gets when it isn't a timetable — each on its own
+     line so "no service" and the way out of it don't run together. */
+  .empty .next-service { display: block; margin-top: 6px; }
+  .empty a.next-service { color: var(--brand-deep); }
 
   /* Expiry warning — yellow when ≤14 days, red when expired */
   .expiry-warning {

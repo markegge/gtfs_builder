@@ -1,5 +1,6 @@
 import { html } from 'hono/html';
 import type { Env } from '../env';
+import type { Calendar, CalendarDate } from './types';
 import { loadEmbedFeed } from './loader';
 import { embedBackToMap, embedHeaders, renderLayout, embedFooter } from './layout';
 import { buildRouteMapData, renderMap } from './map';
@@ -7,13 +8,17 @@ import { renderScheduleTables } from './schedule';
 import {
   activeServicesOn,
   buildServiceProfiles,
-  dayOfWeekInTimezone,
+  dayOfWeekForYmd,
   expiredProfileIds,
+  feedCalendarRange,
+  nextServiceDate,
+  parseDateParam,
   pickDefaultProfile,
   todayInTimezone,
+  ymdToInputValue,
   type ServiceProfile,
 } from './services';
-import { resolveLang, type EmbedStrings } from './i18n';
+import { resolveLang, type EmbedLang, type EmbedStrings } from './i18n';
 import { parseTheme, themeCacheKey, themeStyle } from './theme';
 import { renderImpressionBeacon } from './beacon';
 
@@ -54,65 +59,137 @@ export async function renderRouteEmbed(
   const tz = agency?.agency_timezone;
   const now = new Date();
   // "Today" is the agency's today, never the server's — the same clock the
-  // default-tab picker runs on.
+  // default-profile picker runs on.
   const today = todayInTimezone(tz, now);
-  const dow = dayOfWeekInTimezone(tz, now);
 
-  // Expired service patterns are hidden from riders unless explicitly asked
-  // for (#71). Both the request for them and the date they're judged against
-  // are part of the cache key: `show_expired` because it's a different tab set,
-  // and `today` because that tab set changes at midnight — without it a client
-  // revalidating with yesterday's ETag would be told its copy is still fresh.
-  const showExpiredParam = ['1', 'true', 'yes'].includes(
-    (url.searchParams.get('show_expired') ?? '').trim().toLowerCase(),
-  );
+  // ─── The date this page answers for (#73) ─────────────────────────────────
+  //
+  // `?date=` is the rider's own control: the date picker in the today-banner
+  // replaced the service-day tabs as the way to reach a pattern that isn't
+  // today's. It is transient navigation state, exactly the standing the tabs
+  // had — deliberately NOT something an agency bakes into a snippet, because a
+  // date frozen into an iframe keeps serving one day's schedule forever without
+  // ever looking broken. `src/components/embed/embedOptions.ts` has no `date`
+  // field for that reason; keep it that way.
+  //
+  // An unparseable or nonexistent date falls back to today rather than
+  // erroring, matching how an unknown `?service=` is already handled.
+  const requestedDate = parseDateParam(url.searchParams.get('date'));
+  const selectedDate = requestedDate ?? today;
+  const isToday = selectedDate === today;
+  // Derived from the calendar date itself, so the no-date path computes exactly
+  // what dayOfWeekInTimezone(tz) used to and the two cases share one path.
+  const dow = dayOfWeekForYmd(selectedDate);
 
+  const truthy = (name: string) =>
+    ['1', 'true', 'yes'].includes((url.searchParams.get(name) ?? '').trim().toLowerCase());
+
+  // The tab row is hidden by default now — the date picker is the rider-facing
+  // control, and two ways to choose the same thing is one too many. `show_services`
+  // brings it back for anyone diagnosing a feed from a rider URL.
+  //
+  // `show_expired` (#71) is a *refinement* of that row — "include the ended
+  // patterns too" — so it implies it rather than being a second, parallel
+  // reveal. Asking to see expired tabs on a page with no tabs meant nothing.
+  const showExpiredParam = truthy('show_expired');
+  const showTabs = truthy('show_services') || showExpiredParam;
+
+  // Everything that changes the bytes goes in the ETag. `today` stays in it
+  // alongside `selectedDate` because they are independently load-bearing: the
+  // date drives which schedule renders, while today drives whether the banner
+  // reads "Today is …" or names the date — so a page cached yesterday for an
+  // explicit date is stale this morning even though its date param didn't move.
   const ifNoneMatch = request.headers.get('If-None-Match');
-  const etagBase = `"${feed.snapshotId}-${routeId}-${requestedTab ?? 'auto'}-${view}-${variant}-${today}${
+  const etagBase = `"${feed.snapshotId}-${routeId}-${requestedTab ?? 'auto'}-${view}-${variant}-${today}-d${selectedDate}${
     showExpiredParam ? '-all' : ''
-  }"`;
+  }${showTabs ? '-tabs' : ''}"`;
   if (ifNoneMatch && ifNoneMatch.includes(etagBase)) {
     const headers = embedHeaders(feed.snapshotId, feed.publishedAt);
     headers.set('ETag', etagBase);
     return new Response(null, { status: 304, headers });
   }
 
-  const activeToday = activeServicesOn(today, dow, feed.state.calendars, feed.state.calendarDates);
+  const activeOnDate = activeServicesOn(
+    selectedDate,
+    dow,
+    feed.state.calendars,
+    feed.state.calendarDates,
+  );
 
   const profiles = buildServiceProfiles(feed.state.calendars);
-  const expired = expiredProfileIds(profiles, feed.state.calendarDates, today);
+  // Judged against the *selected* date, not today: a rider looking up a date
+  // last spring should see the pattern that ran then, not be told it's over.
+  const expired = expiredProfileIds(profiles, feed.state.calendarDates, selectedDate);
   // Hiding is for feeds that still have something to show. When *every* pattern
   // has ended, hiding them all would leave a rider on an empty page with no
   // explanation — so show them, and let the warning do the work.
   const allExpired = profiles.length > 0 && expired.size === profiles.length;
   const showExpired = showExpiredParam || allExpired;
 
-  const defaultProfile = pickDefaultProfile(profiles, activeToday, expired);
+  const defaultProfile = pickDefaultProfile(profiles, activeOnDate, expired);
 
   let selected: ServiceProfile | null = null;
-  // An explicit `?service=` resolves against ALL profiles, expired included.
-  // Someone has that URL pinned into a live page; showing them what it actually
-  // points at — with the notice on it — beats silently substituting a different
-  // schedule, which is how this class of bug stays invisible.
-  if (requestedTab) selected = profiles.find((p) => p.id === requestedTab) ?? null;
+  // Precedence: an explicit `?date=` outranks an explicit `?service=`.
+  //
+  // The pin is where the page *starts* — an agency bakes it into an iframe — and
+  // the date is what the rider did next. Honouring the pin over the rider's
+  // click would make the picker a control that visibly does nothing, which is
+  // the silent-mismatch failure this area keeps producing. The picker's form
+  // omits `service` from its hidden inputs, so submitting a date drops the pin
+  // from the URL outright rather than leaving a dead param behind.
+  //
+  // With no date param this is unchanged from #71: the pin resolves against ALL
+  // profiles, expired included, because showing what it actually points at —
+  // with the notice on it — beats silently substituting a different schedule.
+  if (requestedTab && !requestedDate) {
+    selected = profiles.find((p) => p.id === requestedTab) ?? null;
+  }
   if (!selected) selected = defaultProfile;
+
+  // Does *this route* run on the selected date? Feed-wide service isn't enough:
+  // a route can sit idle on a day the rest of the network is running, and the
+  // rider asked about this route.
+  const routeServiceIds = new Set<string>();
+  for (const trip of feed.state.trips) {
+    if (trip.route_id === routeId) routeServiceIds.add(trip.service_id);
+  }
+  let routeRunsOnDate = false;
+  for (const id of activeOnDate) {
+    if (routeServiceIds.has(id)) {
+      routeRunsOnDate = true;
+      break;
+    }
+  }
+
+  // The no-service explanation is for a date the rider *asked* for. With no
+  // date param the page keeps its previous behaviour exactly — banner says "no
+  // service today", the fallback pattern's timetable renders underneath as
+  // context — because a cold load is us guessing, not the rider asking. (This
+  // is the one place the two paths diverge; unifying them is a one-line change
+  // if that context turns out not to be worth the mixed message.)
+  const explainNoService = requestedDate !== null && !routeRunsOnDate;
+  const range = feedCalendarRange(feed.state.calendars, feed.state.calendarDates);
+  const outOfRange = !!range && (selectedDate < range.start || selectedDate > range.end);
+
+  const mapData = buildRouteMapData(route, feed.state, slug);
+  const map = renderMap(mapData, env.MAPBOX_TOKEN);
 
   // Tabs a rider can reach: the live patterns, the expired ones when asked for
   // (or when that's all there is), and whatever is selected — a selected tab
   // missing from its own tab row reads as a broken page.
-  const visibleProfiles = profiles.filter(
-    (p) => showExpired || !expired.has(p.id) || p.id === selected?.id,
-  );
-  const hiddenCount = profiles.length - visibleProfiles.length;
-
-  const mapData = buildRouteMapData(route, feed.state, slug);
-  const map = renderMap(mapData, env.MAPBOX_TOKEN);
+  const visibleProfiles = showTabs
+    ? profiles.filter((p) => showExpired || !expired.has(p.id) || p.id === selected?.id)
+    : [];
+  const hiddenCount = showTabs ? profiles.length - visibleProfiles.length : 0;
 
   const tabs = visibleProfiles.map((p) => {
     const active = selected && p.id === selected.id;
     const isExpired = expired.has(p.id);
     const params = new URLSearchParams(url.search);
     params.set('service', p.id);
+    // A tab is a request for a pattern, not for a day — and `date` outranks
+    // `service`, so carrying it through would make every tab a no-op.
+    params.delete('date');
     const cls = `${active ? 'active' : ''}${isExpired ? ' expired' : ''}`.trim();
     const label = isExpired ? `${p.label} (${t.endedLabel})` : p.label;
     return html`<a href="?${params.toString()}" class="${cls}">${label}</a>`;
@@ -130,12 +207,40 @@ export async function renderRouteEmbed(
         </p>`
       : '';
 
-  const schedule = selected
-    ? renderScheduleTables(route, new Set(selected.serviceIds), feed.state)
-    : html`<p class="empty">${t.noServicePatterns}</p>`;
+  // What goes where the timetable would: the requested date's answer when the
+  // rider named a date this route doesn't run, otherwise the timetable.
+  const schedule = explainNoService
+    ? renderNoServiceForDate({
+        url,
+        selectedDate,
+        today,
+        routeServiceIds,
+        outOfRange,
+        range,
+        calendars: feed.state.calendars,
+        calendarDates: feed.state.calendarDates,
+        lang,
+        t,
+      })
+    : selected
+      ? renderScheduleTables(route, new Set(selected.serviceIds), feed.state)
+      : html`<p class="empty">${t.noServicePatterns}</p>`;
 
-  // Today banner — always shown so the rider knows what schedule is in force.
-  const todayBanner = renderTodayBanner(dow, defaultProfile, activeToday.size === 0, t);
+  // Day banner — always shown so the rider knows what schedule is in force, and
+  // for which day. The "no service" flag stays feed-wide on the default path
+  // (unchanged behaviour) and route-scoped once a date is named, so the banner
+  // can't contradict the explanation rendered underneath it.
+  const dayBanner = renderDayBanner({
+    selectedDate,
+    today,
+    isToday,
+    dayOfWeek: dow,
+    profile: defaultProfile,
+    noService: requestedDate !== null ? !routeRunsOnDate : activeOnDate.size === 0,
+    picker: renderDatePicker(url, selectedDate, range, t),
+    lang,
+    t,
+  });
 
   // Expiry warning — only when within 14d of feed_end_date or already past.
   const expiryWarning = renderExpiryWarning(feed.state.feedInfo?.feed_end_date, today, t);
@@ -143,8 +248,14 @@ export async function renderRouteEmbed(
   // Per-pattern warning, for the selected pattern only. Suppressed when the
   // feed-level banner is already announcing that the whole schedule expired:
   // two near-identical alerts stacked on one page teaches riders to skip both.
+  // Also suppressed when the page is already explaining that the requested date
+  // has no service — the selected profile is then just a fallback nobody asked
+  // about, and "this schedule ended" would be answering a different question.
   const endedWarning =
-    selected && expired.has(selected.id) && !isFeedExpired(feed.state.feedInfo?.feed_end_date, today)
+    !explainNoService &&
+    selected &&
+    expired.has(selected.id) &&
+    !isFeedExpired(feed.state.feedInfo?.feed_end_date, today)
       ? html`
           <div class="expiry-warning expired" role="alert">
             <span>⚠</span>
@@ -217,7 +328,7 @@ export async function renderRouteEmbed(
         ? html`
             ${header}
             ${expiryWarning}
-            ${todayBanner}
+            ${dayBanner}
             ${scheduleSection}
             ${footer}
             ${beacon}
@@ -226,7 +337,7 @@ export async function renderRouteEmbed(
             ${backToMap}
             ${header}
             ${expiryWarning}
-            ${todayBanner}
+            ${dayBanner}
             ${map}
             ${scheduleSection}
             ${footer}
@@ -253,31 +364,192 @@ export async function renderRouteEmbed(
 
 // ─── Banners ────────────────────────────────────────────────────────────────
 
-function renderTodayBanner(
-  dayOfWeek: number,
-  defaultProfile: ServiceProfile | null,
-  noServiceToday: boolean,
-  t: EmbedStrings,
-) {
-  const dayName = t.dayNames[dayOfWeek] ?? '';
-  if (noServiceToday || !defaultProfile) {
-    return html`
-      <div class="today-banner muted" role="status">
-        <span class="dot"></span>
-        <span><strong>${t.todayIs(dayName)}</strong> <span class="sep">·</span> ${t.noServiceToday}</span>
-      </div>
-    `;
-  }
+/**
+ * The banner naming the day on show and the pattern in force, with the date
+ * picker sitting at its trailing edge.
+ *
+ * The lead clause follows the selected date: "Today is Wednesday" only while
+ * the page really is showing today. Once a rider picks another day it names
+ * that day instead, because a page headed "Today is …" over next Tuesday's
+ * timetable is worse than no heading at all.
+ */
+function renderDayBanner(opts: {
+  selectedDate: string;
+  today: string;
+  isToday: boolean;
+  dayOfWeek: number;
+  profile: ServiceProfile | null;
+  noService: boolean;
+  picker: ReturnType<typeof html> | '';
+  lang: EmbedLang;
+  t: EmbedStrings;
+}) {
+  const { selectedDate, today, isToday, dayOfWeek, profile, noService, picker, lang, t } = opts;
+  const lead = isToday
+    ? t.todayIs(t.dayNames[dayOfWeek] ?? '')
+    : formatDateWithWeekday(selectedDate, lang, today);
+  const effect =
+    noService || !profile
+      ? isToday
+        ? t.noServiceToday
+        : t.noServiceOnDate
+      : t.scheduleInEffect(profile.label);
+  const muted = noService || !profile;
   return html`
-    <div class="today-banner" role="status">
+    <div class="today-banner${muted ? ' muted' : ''}" role="status">
       <span class="dot"></span>
       <span>
-        <strong>${t.todayIs(dayName)}</strong>
+        <strong>${lead}</strong>
         <span class="sep">·</span>
-        ${t.scheduleInEffect(defaultProfile.label)}
+        ${effect}
       </span>
+      ${picker}
     </div>
   `;
+}
+
+/**
+ * The date picker: a plain `<form method="get">` around an `<input type="date">`.
+ *
+ * No JavaScript, on purpose — these pages are chrome-light and the controls they
+ * replaced were plain links, so the picker degrades to a normal navigation the
+ * same way. The visible submit button is the cost of that: a native date input
+ * fires no navigation of its own when a rider taps a day in the calendar popup.
+ *
+ * A GET form replaces the query string wholesale with its own fields, which is
+ * what makes the hidden-input list the *complete* definition of what survives a
+ * date change. Presentation params (theme/lang/font/view) and the diagnostic
+ * reveals ride along; `service` deliberately does NOT, so picking a date drops a
+ * pinned pattern visibly in the URL instead of leaving a param that outranks
+ * nothing and explains less.
+ */
+const PICKER_CARRY_PARAMS = [
+  'accent',
+  'theme',
+  'font',
+  'lang',
+  'view',
+  'show_services',
+  'show_expired',
+] as const;
+
+function renderDatePicker(
+  url: URL,
+  selectedDate: string,
+  range: { start: string; end: string } | null,
+  t: EmbedStrings,
+) {
+  const hidden = PICKER_CARRY_PARAMS.filter((name) => url.searchParams.has(name)).map(
+    (name) => html`<input type="hidden" name="${name}" value="${url.searchParams.get(name) ?? ''}" />`,
+  );
+  // `min`/`max` are advisory: they grey out uncovered days in the browser's own
+  // calendar, which communicates the feed's coverage for free. They are not
+  // validation — a hand-typed URL still reaches the server — which is why the
+  // out-of-range message underneath has to exist regardless.
+  const min = range ? html` min="${ymdToInputValue(range.start)}"` : '';
+  const max = range ? html` max="${ymdToInputValue(range.end)}"` : '';
+  return html`
+    <form class="date-picker" method="get">
+      ${hidden}
+      <input
+        type="date"
+        name="date"
+        value="${ymdToInputValue(selectedDate)}"
+        aria-label="${t.showScheduleForDate}"${min}${max}
+      />
+      <button type="submit">${t.go}</button>
+    </form>
+  `;
+}
+
+/**
+ * What a rider gets instead of a timetable when the date they picked isn't one
+ * this route runs.
+ *
+ * Two different answers, kept apart because they mean different things: a day
+ * inside the feed's coverage with nothing scheduled ("no service that day") is a
+ * fact about the service, while a day outside it ("the feed doesn't go that far")
+ * is a fact about the data. Collapsing them would tell a rider asking about next
+ * summer that the bus doesn't run then, which nobody knows.
+ *
+ * Either way the page offers the next day this route does run, when there is
+ * one — a dead end with a date picker on it is still a dead end.
+ */
+function renderNoServiceForDate(opts: {
+  url: URL;
+  selectedDate: string;
+  today: string;
+  routeServiceIds: ReadonlySet<string>;
+  outOfRange: boolean;
+  range: { start: string; end: string } | null;
+  calendars: Calendar[];
+  calendarDates: CalendarDate[];
+  lang: EmbedLang;
+  t: EmbedStrings;
+}) {
+  const { url, selectedDate, today, routeServiceIds, outOfRange, range, lang, t } = opts;
+  const next = nextServiceDate(selectedDate, routeServiceIds, opts.calendars, opts.calendarDates);
+  // Built off the current query so the rider keeps the theme and language they
+  // are already looking at — a link that silently reverts the embed to default
+  // English is a worse dead end than the one it's rescuing them from.
+  let nextHref = '';
+  if (next) {
+    const params = new URLSearchParams(url.search);
+    params.set('date', ymdToInputValue(next));
+    nextHref = `?${params.toString()}`;
+  }
+  return html`
+    <p class="empty">
+      <span>${t.noServiceOnDate}</span>
+      ${outOfRange && range
+        ? html`<span class="next-service"
+            >${t.scheduleCovers(
+              formatDateMedium(range.start, lang),
+              formatDateMedium(range.end, lang),
+            )}</span
+          >`
+        : ''}
+      ${next
+        ? html`<a class="next-service" href="${nextHref}"
+            >${t.nextServiceOn(formatDateWithWeekday(next, lang, today))}</a
+          >`
+        : ''}
+    </p>
+  `;
+}
+
+// ─── Localized date formatting ───────────────────────────────────────────────
+//
+// Formatted through Intl in the page's own language rather than from five
+// hand-written month/weekday tables — the day and month names riders read are
+// exactly the ones their locale already uses, and there is nothing to keep in
+// sync in i18n.ts. (`formatYmd` below still hardcodes en-US; it predates this
+// and belongs to the #71 expiry banners, so it's left alone here.)
+
+/** "Friday, December 25" — with the year only when it isn't the current one. */
+function formatDateWithWeekday(ymd: string, lang: EmbedLang, today: string): string {
+  const ms = ymdToUtcDay(ymd);
+  if (ms === null) return ymd;
+  const sameYear = ymd.slice(0, 4) === today.slice(0, 4);
+  return new Intl.DateTimeFormat(lang, {
+    timeZone: 'UTC',
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+  }).format(new Date(ms));
+}
+
+/** "December 25, 2026" — always with the year; used for the feed's coverage span. */
+function formatDateMedium(ymd: string, lang: EmbedLang): string {
+  const ms = ymdToUtcDay(ymd);
+  if (ms === null) return ymd;
+  return new Intl.DateTimeFormat(lang, {
+    timeZone: 'UTC',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(new Date(ms));
 }
 
 /**

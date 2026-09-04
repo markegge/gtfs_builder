@@ -109,6 +109,11 @@ const DARK_CSS = `
   .service-tabs a, .embed-nav a { color: #e7ddcd; }
   .service-tabs a.expired { color: #a2947f; }
   .service-note { color: #b8ac9b; }
+  /* color-scheme is what makes the browser's *native* date popup dark too —
+     without it Chrome and Safari render a white calendar over a dark embed. */
+  .date-picker input[type='date'] { background: #1d1813; border-color: #3a2f22; color: #e7ddcd; color-scheme: dark; }
+  .date-picker button { border-color: #3a2f22; color: #e7ddcd; }
+  .date-picker button:hover { background: #241d15; }
   .route-list a { color: #f2ece3; }
   .route-list a:hover { background: #241d15; }
   .dep-time, .dep-route, .dep-headsign { color: #f2ece3; }

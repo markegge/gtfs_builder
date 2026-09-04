@@ -71,6 +71,30 @@ describe('optionsQuery', () => {
       '?theme=dark&lang=es',
     );
   });
+
+  // ─── The date picker is NOT a snippet option (#73) ────────────────────────
+
+  it('NEVER emits a date param, for any embed', () => {
+    // `?date=` is rider navigation the embed page sets on itself, not something
+    // an agency bakes into an iframe. A date frozen into a snippet would serve
+    // one day's schedule forever, on a page that never looks broken — the worst
+    // shape of this failure, because nothing ever surfaces it.
+    //
+    // A "must never appear" guard can't be made to fail against the current
+    // builder; it fails the moment someone adds a `date` field to EmbedOptions
+    // and wires it up, which is exactly when it needs to.
+    const every = opts({
+      accent: 'abcdef',
+      mode: 'dark',
+      font: 'mono',
+      lang: 'fr',
+      service: 'svc-x',
+    });
+    expect(optionsQuery(every)).not.toContain('date');
+    expect(optionsQuery(every, { includeService: true })).not.toContain('date');
+    // The option shape itself has no date to emit.
+    expect(Object.keys(DEFAULT_EMBED_OPTIONS)).not.toContain('date');
+  });
 });
 
 describe('servicePinApplies', () => {
