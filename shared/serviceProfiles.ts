@@ -59,6 +59,12 @@ export interface ServiceProfile {
   label: string;
   // The actual GTFS service_ids that share this day pattern.
   serviceIds: string[];
+  // calendar.txt `end_date` (YYYYMMDD) shared by every row in the profile — the
+  // profile splits on the date range, so there is exactly one. This is the date
+  // a pattern's expiry is judged on (worker/embeds/services.ts
+  // `expiredProfileIds`); '' when the feed left it blank, which reads as
+  // "no end", never as expired.
+  endDate: string;
 }
 
 /**
@@ -108,6 +114,7 @@ export function buildServiceProfiles(calendars: ServiceCalendarRow[]): ServicePr
         ? `${p.baseLabel} (${formatYmdShort(p.startDate)}–${formatYmdShort(p.endDate)})`
         : p.baseLabel,
     serviceIds: p.serviceIds,
+    endDate: p.endDate,
   }));
 
   // Order: Weekday → Saturday → Sunday → Daily → other (alphabetical).

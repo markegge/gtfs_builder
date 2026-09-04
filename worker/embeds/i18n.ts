@@ -40,6 +40,31 @@ export interface EmbedStrings {
   scheduleInEffect: (label: string) => string;
   scheduleExpired: (days: number) => string;
   scheduleExpiresIn: (days: number, date: string) => string;
+  // Per-pattern expiry (#71): the banner on an ended pattern, the note that
+  // says one was hidden, the link that reveals it, and the tab marker.
+  serviceEnded: (date: string) => string;
+  pastServiceHidden: string;
+  showAllServices: string;
+  endedLabel: string;
+  // Rider-facing date picker (#73). The control that replaced the service-day
+  // tabs: `showScheduleForDate` labels the input for screen readers, `go`
+  // submits it, and the other three are the answers a chosen date can get when
+  // it isn't a timetable.
+  //
+  // The date itself is never a string here — it's formatted with
+  // Intl.DateTimeFormat in the request's language (worker/embeds/route.ts), so
+  // weekday and month names localize without five hand-written month tables.
+  showScheduleForDate: string;
+  // `go` labels the submit button, which only clients without JavaScript ever
+  // see — everyone else gets the auto-submit, and `dateAutoUpdates` is appended
+  // to the input's accessible name so a screen reader announces the navigation
+  // before the rider triggers it (WCAG 3.2.2). Both strings are still needed:
+  // the button is what the no-JS path submits with.
+  go: string;
+  dateAutoUpdates: string;
+  noServiceOnDate: string;
+  nextServiceOn: (date: string) => string;
+  scheduleCovers: (start: string, end: string) => string;
   serviceDay: string;
   stopIdLabel: string;
   routeCount: (n: number) => string;
@@ -68,6 +93,16 @@ const EN: EmbedStrings = {
   scheduleInEffect: (label) => `${label} schedule in effect`,
   scheduleExpired: (days) => `Schedule expired ${days} day${days === 1 ? '' : 's'} ago.`,
   scheduleExpiresIn: (days, date) => `Schedule expires in ${days} day${days === 1 ? '' : 's'} (${date}).`,
+  serviceEnded: (date) => `This schedule ended on ${date}.`,
+  pastServiceHidden: 'Past service patterns are hidden.',
+  showAllServices: 'Show all',
+  endedLabel: 'ended',
+  showScheduleForDate: 'Show the schedule for a date',
+  go: 'Go',
+  dateAutoUpdates: 'The schedule updates when you pick a date',
+  noServiceOnDate: 'No service on this date.',
+  nextServiceOn: (date) => `Next service: ${date}`,
+  scheduleCovers: (start, end) => `This schedule covers ${start} – ${end}.`,
   serviceDay: 'Service day',
   stopIdLabel: 'Stop ID',
   routeCount: (n) => `${n} route${n === 1 ? '' : 's'}`,
@@ -94,6 +129,16 @@ const ES: EmbedStrings = {
   scheduleInEffect: (label) => `Horario ${label} en vigor`,
   scheduleExpired: (days) => `El horario venció hace ${days} día${days === 1 ? '' : 's'}.`,
   scheduleExpiresIn: (days, date) => `El horario vence en ${days} día${days === 1 ? '' : 's'} (${date}).`,
+  serviceEnded: (date) => `Este horario finalizó el ${date}.`,
+  pastServiceHidden: 'Los horarios finalizados están ocultos.',
+  showAllServices: 'Mostrar todos',
+  endedLabel: 'finalizado',
+  showScheduleForDate: 'Ver el horario de una fecha',
+  go: 'Ir',
+  dateAutoUpdates: 'El horario se actualiza al elegir una fecha',
+  noServiceOnDate: 'Sin servicio en esta fecha.',
+  nextServiceOn: (date) => `Próximo servicio: ${date}`,
+  scheduleCovers: (start, end) => `Este horario cubre del ${start} al ${end}.`,
   serviceDay: 'Día de servicio',
   stopIdLabel: 'ID de parada',
   routeCount: (n) => `${n} ruta${n === 1 ? '' : 's'}`,
@@ -120,6 +165,16 @@ const FR: EmbedStrings = {
   scheduleInEffect: (label) => `Horaire ${label} en vigueur`,
   scheduleExpired: (days) => `Horaire expiré il y a ${days} jour${days === 1 ? '' : 's'}.`,
   scheduleExpiresIn: (days, date) => `Horaire expire dans ${days} jour${days === 1 ? '' : 's'} (${date}).`,
+  serviceEnded: (date) => `Cet horaire a pris fin le ${date}.`,
+  pastServiceHidden: 'Les horaires terminés sont masqués.',
+  showAllServices: 'Tout afficher',
+  endedLabel: 'terminé',
+  showScheduleForDate: 'Afficher l’horaire d’une date',
+  go: 'Valider',
+  dateAutoUpdates: 'L’horaire se met à jour lorsque vous choisissez une date',
+  noServiceOnDate: 'Pas de service à cette date.',
+  nextServiceOn: (date) => `Prochain service : ${date}`,
+  scheduleCovers: (start, end) => `Cet horaire couvre du ${start} au ${end}.`,
   serviceDay: 'Jour de service',
   stopIdLabel: 'Arrêt n°',
   routeCount: (n) => `${n} ligne${n === 1 ? '' : 's'}`,
@@ -146,6 +201,16 @@ const DE: EmbedStrings = {
   scheduleInEffect: (label) => `Fahrplan ${label} in Kraft`,
   scheduleExpired: (days) => `Fahrplan vor ${days} Tag${days === 1 ? '' : 'en'} abgelaufen.`,
   scheduleExpiresIn: (days, date) => `Fahrplan läuft in ${days} Tag${days === 1 ? '' : 'en'} ab (${date}).`,
+  serviceEnded: (date) => `Dieser Fahrplan endete am ${date}.`,
+  pastServiceHidden: 'Beendete Fahrpläne sind ausgeblendet.',
+  showAllServices: 'Alle anzeigen',
+  endedLabel: 'beendet',
+  showScheduleForDate: 'Fahrplan für ein Datum anzeigen',
+  go: 'Anzeigen',
+  dateAutoUpdates: 'Der Fahrplan wird aktualisiert, sobald Sie ein Datum wählen',
+  noServiceOnDate: 'An diesem Tag kein Service.',
+  nextServiceOn: (date) => `Nächster Verkehrstag: ${date}`,
+  scheduleCovers: (start, end) => `Dieser Fahrplan gilt vom ${start} bis zum ${end}.`,
   serviceDay: 'Verkehrstag',
   stopIdLabel: 'Haltestellen-ID',
   routeCount: (n) => `${n} Linie${n === 1 ? '' : 'n'}`,
@@ -172,6 +237,16 @@ const PT: EmbedStrings = {
   scheduleInEffect: (label) => `Horário ${label} em vigor`,
   scheduleExpired: (days) => `O horário expirou há ${days} dia${days === 1 ? '' : 's'}.`,
   scheduleExpiresIn: (days, date) => `O horário expira em ${days} dia${days === 1 ? '' : 's'} (${date}).`,
+  serviceEnded: (date) => `Este horário terminou em ${date}.`,
+  pastServiceHidden: 'Os horários encerrados estão ocultos.',
+  showAllServices: 'Mostrar todos',
+  endedLabel: 'encerrado',
+  showScheduleForDate: 'Ver o horário de uma data',
+  go: 'Ir',
+  dateAutoUpdates: 'O horário é atualizado ao escolher uma data',
+  noServiceOnDate: 'Sem serviço nesta data.',
+  nextServiceOn: (date) => `Próximo serviço: ${date}`,
+  scheduleCovers: (start, end) => `Este horário abrange de ${start} a ${end}.`,
   serviceDay: 'Dia de serviço',
   stopIdLabel: 'ID da parada',
   routeCount: (n) => `${n} linha${n === 1 ? '' : 's'}`,

@@ -13,16 +13,26 @@ import type { ServiceProfile } from '../../shared/serviceProfiles';
 /** A published service profile, plus the routes that actually run it. */
 export interface EmbedServiceProfile extends ServiceProfile {
   routeIds: string[];
+  // Whether the pattern's date range has already ended, as judged by the
+  // server against the agency's own today (#71). The rider-facing embed hides
+  // expired patterns; the picker deliberately shows them, marked — an agency
+  // may want to pin a seasonal pattern before its season, or work out why one
+  // stopped appearing publicly.
+  expired: boolean;
 }
 
 /** Wire shape — snake_case, like the rest of the read-only JSON API. */
+interface ServiceWire {
+  id?: string;
+  label?: string;
+  service_ids?: string[];
+  route_ids?: string[];
+  end_date?: string | null;
+  expired?: boolean;
+}
+
 interface ServicesResponse {
-  services?: {
-    id?: string;
-    label?: string;
-    service_ids?: string[];
-    route_ids?: string[];
-  }[];
+  services?: ServiceWire[];
 }
 
 /**
@@ -42,12 +52,17 @@ export async function fetchEmbedServiceProfiles(
   }
   const body = (await res.json()) as ServicesResponse;
   return (body.services ?? [])
-    .filter((s): s is { id: string; label: string; service_ids?: string[]; route_ids?: string[] } =>
+    .filter((s): s is ServiceWire & { id: string; label: string } =>
       typeof s?.id === 'string' && typeof s?.label === 'string')
     .map((s) => ({
       id: s.id,
       label: s.label,
       serviceIds: s.service_ids ?? [],
       routeIds: s.route_ids ?? [],
+      // Both default to "not expired" so a server that hasn't shipped the
+      // fields yet degrades to the old behaviour — every pattern offered
+      // unmarked — rather than labelling live patterns as ended.
+      endDate: s.end_date ?? '',
+      expired: s.expired === true,
     }));
 }

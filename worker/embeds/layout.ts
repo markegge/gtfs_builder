@@ -124,6 +124,54 @@ const STYLES = `
   .today-banner.muted .dot { background: #b88a4a; }
   .today-banner strong { font-weight: 600; }
   .today-banner .sep { color: #b88a4a; }
+  /* The date picker sits inside the today-banner, at its trailing edge, so it
+     reads as a refinement of "showing this day's schedule" rather than a form
+     bolted underneath one. margin-left:auto pushes it right on a wide embed;
+     flex-wrap on the banner lets it drop to its own line on a narrow one
+     instead of squeezing the sentence. */
+  .today-banner { flex-wrap: wrap; }
+  .date-picker {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+  .date-picker input[type='date'] {
+    font: inherit;
+    font-size: 12px;
+    color: #5a4525;
+    background: #fffdf8;
+    border: 1px solid #e0cba8;
+    border-radius: 4px;
+    padding: 2px 6px;
+    /* iOS Safari stretches a date input to a fixed intrinsic width and adds
+       inner shadow; both make it read as a heavyweight form field. */
+    -webkit-appearance: none;
+    appearance: none;
+    min-height: 24px;
+  }
+  .date-picker button {
+    font: inherit;
+    font-size: 12px;
+    color: var(--brand-deep);
+    background: transparent;
+    border: 1px solid #e0cba8;
+    border-radius: 4px;
+    padding: 2px 8px;
+    min-height: 24px;
+    cursor: pointer;
+  }
+  .date-picker button:hover { background: #fdf3e3; }
+  /* The picker's submit button is removed by its own enhancement script (see
+     renderDatePicker in embeds/route.ts), which sets [hidden]. The UA
+     stylesheet already gives that display:none, but it is the weakest rule in
+     the cascade — this makes a future display: rule on .date-picker button
+     unable to resurrect a button the script has retired. */
+  .date-picker button[hidden] { display: none; }
+  /* The answers a chosen date gets when it isn't a timetable — each on its own
+     line so "no service" and the way out of it don't run together. */
+  .empty .next-service { display: block; margin-top: 6px; }
+  .empty a.next-service { color: var(--brand-deep); }
 
   /* Expiry warning — yellow when ≤14 days, red when expired */
   .expiry-warning {
@@ -212,6 +260,20 @@ const STYLES = `
     color: var(--brand-deep);
     font-weight: 700;
   }
+  /* An expired pattern, when one is on show (#71) — legible, but visibly not
+     the schedule a rider should be planning around. */
+  .service-tabs a.expired { color: #8a7a6a; font-style: italic; }
+  .service-tabs a.expired.active { color: var(--brand-deep); }
+  /* The one-line note under the tabs saying some patterns were hidden, plus its
+     reveal link. Deliberately quiet: it is for the rider who wonders, not the
+     rider who is looking up a departure time. */
+  .service-note {
+    font-size: 12px;
+    color: #6b6b6b;
+    margin: -4px 0 12px;
+  }
+  .service-note a { color: var(--brand-deep); }
+
   /* Flush left so it lines up with the header beneath it. */
   .embed-nav a {
     display: inline-flex;

@@ -8,6 +8,7 @@ import {
   activeServicesOn,
   buildServiceProfiles,
   dayOfWeekInTimezone,
+  expiredProfileIds,
   pickDefaultProfile,
   todayInTimezone,
 } from './services';
@@ -46,7 +47,10 @@ export async function renderLandingPage(
   const dayName = DAY_NAMES[dow] ?? '';
   const activeToday = activeServicesOn(today, dow, feed.state.calendars, feed.state.calendarDates);
   const profiles = buildServiceProfiles(feed.state.calendars);
-  const defaultProfile = pickDefaultProfile(profiles, activeToday);
+  // Expiry-aware for the same reason the route embed is (#71): this banner
+  // names a schedule as being "in effect", and it must not name a dead one.
+  const profileExpiry = expiredProfileIds(profiles, feed.state.calendarDates, today);
+  const defaultProfile = pickDefaultProfile(profiles, activeToday, profileExpiry);
   const expiryWarning = renderExpiryWarning(feed.state.feedInfo?.feed_end_date, today);
 
   const data = buildSystemMapData(feed.state, slug);

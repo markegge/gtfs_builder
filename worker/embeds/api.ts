@@ -26,7 +26,7 @@
 import type { Env } from '../env';
 import { loadEmbedFeed } from './loader';
 import { planHasFeature } from '../billing/plans';
-import { buildServiceProfiles } from './services';
+import { buildServiceProfiles, expiredProfileIds, todayInTimezone } from './services';
 import type { LoadedEmbedFeed, Route, Stop, Trip, StopTime } from './types';
 
 export const API_VERSION = 'v1';
@@ -64,7 +64,11 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     const routeId = decodeURIComponent(m[2]);
     return serve(request, env, m[1], (f) => apiRoute(f, routeId), `route-${m![2]}`);
   }
-  if ((m = path.match(API_SERVICES_RE))) return serve(request, env, m[1], apiServices, 'services');
+  if ((m = path.match(API_SERVICES_RE))) {
+    // Date-varying suffix: /services carries an `expired` flag, so a body built
+    // yesterday must not revalidate as fresh today. See apiServices.
+    return serve(request, env, m[1], apiServices, (f) => `services-${feedToday(f)}`);
+  }
   if ((m = path.match(API_STOPS_RE))) return serve(request, env, m[1], apiStops);
   if ((m = path.match(API_STOP_SCHEDULE_RE))) {
     const stopId = decodeURIComponent(m[2]);
@@ -83,6 +87,18 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
 type Builder = (feed: LoadedEmbedFeed) => unknown | null;
 
 /**
+ * ETag discriminator for endpoints that share a snapshot. A function form is
+ * for bodies that depend on something outside the snapshot (today's date, for
+ * /services' `expired` flag) and so need it in the cache key.
+ */
+type EtagSuffix = string | ((feed: LoadedEmbedFeed) => string);
+
+/** Today (YYYYMMDD) in the feed's own agency timezone — never the server's. */
+function feedToday(feed: LoadedEmbedFeed): string {
+  return todayInTimezone(feed.state.agencies[0]?.agency_timezone);
+}
+
+/**
  * Shared request flow for every endpoint: load the published snapshot, gate on
  * the owner's `embeds` entitlement, compute a snapshot-derived ETag (honoring
  * conditional requests), build the body, and serialise with the embed cache +
@@ -94,7 +110,7 @@ async function serve(
   env: Env,
   slug: string,
   builder: Builder,
-  etagSuffix?: string,
+  etagSuffix?: EtagSuffix,
 ): Promise<Response> {
   const feed = await loadEmbedFeed(env, slug);
   if (!feed) return apiError(404, 'not_found', 'No feed published here.');
@@ -105,7 +121,8 @@ async function serve(
     return apiError(403, 'plan_required', 'The JSON API requires the Planner plan or higher.');
   }
 
-  const etag = `"${feed.snapshotId}${etagSuffix ? `-${etagSuffix}` : '-api'}"`;
+  const suffix = typeof etagSuffix === 'function' ? etagSuffix(feed) : etagSuffix;
+  const etag = `"${feed.snapshotId}${suffix ? `-${suffix}` : '-api'}"`;
   if (etagMatches(request.headers.get('If-None-Match'), etag)) {
     return new Response(null, { status: 304, headers: jsonHeaders(etag, feed.publishedAt) });
   }
@@ -200,9 +217,21 @@ function apiIndex(feed: LoadedEmbedFeed, env: Env) {
  * editor state, a second hash implementation) would stop matching the moment
  * the two drifted, and the embed would silently fall back to today's service.
  *
- * Deliberately carries no "which profile is active today" field — the response
- * is edge-cached against a snapshot-derived ETag, so anything time-dependent
- * would be served stale. Today's profile is resolved per-request by the embed.
+ * Carries no "which profile is active today" field: which pattern a rider is
+ * shown is resolved per-request by the embed, and a cached answer to that would
+ * be wrong within hours.
+ *
+ * `expired` (#71) is the one time-dependent field, and it earns it — a
+ * publishing surface that can't say a pattern has ended is how a discontinued
+ * shuttle keeps a live-looking tab. Its granularity is a day, and the ETag
+ * carries the agency-timezone date so a stored body never revalidates across
+ * midnight; the `s-maxage` edge TTL still allows up to an hour of lag on the day
+ * a pattern flips. `end_date` is the snapshot value it was judged on.
+ *
+ * Every profile is listed, expired ones included. That is deliberately NOT what
+ * the rider-facing embed does (it hides them): this is the operator's view, and
+ * an agency needs to see a seasonal pattern before its season, and to be able
+ * to tell why one stopped appearing on the public page.
  *
  * `route_ids` lists the routes that actually have a trip on the profile, so a
  * caller can offer only the patterns that mean something for a given route.
@@ -211,6 +240,7 @@ function apiIndex(feed: LoadedEmbedFeed, env: Env) {
  */
 function apiServices(feed: LoadedEmbedFeed) {
   const profiles = buildServiceProfiles(feed.state.calendars);
+  const expired = expiredProfileIds(profiles, feed.state.calendarDates, feedToday(feed));
 
   const routesByService = new Map<string, Set<string>>();
   for (const t of feed.state.trips) {
@@ -239,6 +269,8 @@ function apiServices(feed: LoadedEmbedFeed) {
         label: p.label,
         service_ids: p.serviceIds,
         route_ids: Array.from(routeIds).sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)),
+        end_date: p.endDate || null,
+        expired: expired.has(p.id),
       };
     }),
   };

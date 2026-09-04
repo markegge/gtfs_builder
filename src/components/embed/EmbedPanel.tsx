@@ -137,6 +137,25 @@ export function EmbedPanel() {
 }
 
 /**
+ * `" on Jun 7, 2026"` for a YYYYMMDD end date, or `''` when the feed left it
+ * blank — so the caller reads "ended" rather than "ended on Invalid Date".
+ * The year is carried, unlike the tab labels' short form: whether a pattern
+ * ended in June or last June is the whole question here.
+ */
+function endedOn(ymd: string): string {
+  const m = /^(\d{4})(\d{2})(\d{2})$/.exec(ymd);
+  if (!m) return '';
+  const date = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  const formatted = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(date);
+  return ` on ${formatted}`;
+}
+
+/**
  * Service-pattern picker. Its own section rather than part of "Theme &
  * language" — pinning a schedule is a content choice, not a cosmetic one.
  *
@@ -156,6 +175,8 @@ function ServiceSection({
   options: EmbedOptions;
   onChange: (o: EmbedOptions) => void;
 }) {
+  const pinnedExpired =
+    profiles?.find((p) => p.id === options.service && p.expired) ?? null;
   return (
     <section>
       <h3 className="font-heading font-bold text-sm text-dark-brown mb-1">Service pattern</h3>
@@ -163,6 +184,11 @@ function ServiceSection({
         Per-route embeds open on today’s service by default. Pin one here to always show a
         particular schedule — a Saturday timetable on a weekend-service page, say, or a
         seasonal pattern. Riders can still switch tabs.
+      </p>
+      <p className="text-xs text-warm-gray mb-3">
+        Patterns whose dates have already ended are hidden from riders, so a discontinued
+        seasonal schedule stops showing up on your site by itself. They stay listed here,
+        marked — pin one and the embed will show it, with an “ended” notice.
       </p>
       {error ? (
         <p className="text-xs text-red-600">{error}</p>
@@ -187,11 +213,17 @@ function ServiceSection({
               <option value="">Automatic (today’s service)</option>
               {profiles.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.label}
+                  {p.expired ? `${p.label} — ended${endedOn(p.endDate)}` : p.label}
                 </option>
               ))}
             </select>
           </label>
+          {pinnedExpired ? (
+            <p className="text-[11px] text-amber-700 mt-2">
+              This pattern ended{endedOn(pinnedExpired.endDate)}. Embeds pinned to it still show
+              its timetable, with a notice telling riders the service is over.
+            </p>
+          ) : null}
           <p className="text-[11px] text-warm-gray mt-2">
             These patterns come from your published feed. Republish after changing{' '}
             <code className="text-coral">calendar.txt</code> so the pinned id keeps matching.

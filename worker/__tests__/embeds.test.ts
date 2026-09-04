@@ -154,6 +154,235 @@ function makeDayPatternState(): SnapshotState {
   };
 }
 
+/**
+ * A YYYYMMDD date `days` from now, read in the fixture agency's timezone
+ * (America/Denver) — the same clock `todayInTimezone` uses. Relative rather
+ * than hard-coded so an "expired" fixture stays expired, and a live one stays
+ * live, however long after this was written the suite runs.
+ */
+function ymdFromNow(days: number): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Denver',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+    .format(new Date(Date.now() + days * 86_400_000))
+    .replace(/-/g, '');
+}
+
+/** YYYYMMDD → the YYYY-MM-DD an `<input type="date">` submits. */
+function ymdToInput(ymd: string): string {
+  return `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`;
+}
+
+/**
+ * The date picker's own enhancement script, isolated from the page's other
+ * inline scripts (the Mapbox init, the impression beacon) so an assertion about
+ * the picker can't be satisfied by a coincidence somewhere else in the page.
+ */
+function pickerScript(html: string): string {
+  // `(?!</script>)` keeps the lazy runs from spilling across a script boundary
+  // into the map's IIFE, which would let a map-only token satisfy an assertion
+  // that is supposed to be about the picker.
+  const body = String.raw`(?:(?!<\/script>)[\s\S])*?`;
+  const m = new RegExp(
+    String.raw`<script>\s*(\(function \(\) \{${body}date-picker${body}\}\)\(\);?)\s*<\/script>`,
+  ).exec(html);
+  if (!m) throw new Error('no date-picker script found in the embed HTML');
+  return m[1];
+}
+
+/** Weekday index (0 = Sunday) of a YYYYMMDD calendar date. */
+function dowOf(ymd: string): number {
+  return new Date(
+    Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)),
+  ).getUTCDay();
+}
+
+/** YYYYMMDD `n` days from `ymd`. */
+function plusDays(ymd: string, n: number): string {
+  const d = new Date(
+    Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)) + n * 86_400_000,
+  );
+  return (
+    `${d.getUTCFullYear()}` +
+    `${String(d.getUTCMonth() + 1).padStart(2, '0')}` +
+    `${String(d.getUTCDate()).padStart(2, '0')}`
+  );
+}
+
+/** First date on or after `ymd` falling on a weekend. */
+function weekendOnOrAfter(ymd: string): string {
+  let cursor = ymd;
+  while (dowOf(cursor) !== 0 && dowOf(cursor) !== 6) cursor = plusDays(cursor, 1);
+  return cursor;
+}
+
+/**
+ * The next date on or after today falling on weekday `dow` (0 = Sunday).
+ *
+ * The date-picker tests need to name a *known weekday* without hard-coding a
+ * calendar date that would rot, and without asserting anything that only holds
+ * on the day the suite happens to run.
+ */
+function nextDow(dow: number): string {
+  for (let i = 0; i < 8; i++) {
+    const ymd = ymdFromNow(i);
+    if (dowOf(ymd) === dow) return ymd;
+  }
+  throw new Error(`no ${dow} within a week`);
+}
+
+/** Departure time unique to the expired seasonal pattern below. */
+const SEASONAL_ONLY_TIME = '5:33p';
+/** Departure time unique to the live all-week pattern below. */
+const LIVE_ONLY_TIME = '9:09a';
+
+/**
+ * A live all-week pattern plus a seasonal Sat+Sun one that ended a month ago —
+ * the `cat` (Columbia Area Transit) shape from issue #71, where a discontinued
+ * Dog Mountain shuttle kept its own tab and full timetable.
+ *
+ * feed_end_date is deliberately a year out, so the feed-level
+ * `renderExpiryWarning` stays silent and anything the page says about the
+ * expired pattern has to come from the per-profile check.
+ */
+function makeExpiredSeasonalState(): SnapshotState {
+  const base = makeFeedState();
+  return {
+    ...base,
+    feedInfo: {
+      feed_publisher_name: 'EmbedAgency',
+      feed_start_date: ymdFromNow(-365),
+      feed_end_date: ymdFromNow(365),
+    },
+    calendars: [
+      { service_id: 'LIVE', monday: 1, tuesday: 1, wednesday: 1, thursday: 1, friday: 1, saturday: 1, sunday: 1, start_date: ymdFromNow(-365), end_date: ymdFromNow(365) },
+      { service_id: 'SEASON', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 0, saturday: 1, sunday: 1, start_date: ymdFromNow(-120), end_date: ymdFromNow(-30) },
+    ],
+    calendarDates: [],
+    trips: [
+      { trip_id: 'lv1', route_id: 'R1', service_id: 'LIVE', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+      { trip_id: 'sn1', route_id: 'R1', service_id: 'SEASON', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Dog Mountain' },
+    ],
+    stopTimes: [
+      { trip_id: 'lv1', arrival_time: '09:09:00', departure_time: '09:09:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'lv1', arrival_time: '09:19:00', departure_time: '09:19:00', stop_id: 's2', stop_sequence: 2 },
+      { trip_id: 'sn1', arrival_time: '17:33:00', departure_time: '17:33:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'sn1', arrival_time: '17:43:00', departure_time: '17:43:00', stop_id: 's2', stop_sequence: 2 },
+    ],
+  };
+}
+
+/** Same two patterns, but both ended — nothing left to fall back to. */
+function makeAllExpiredState(): SnapshotState {
+  const base = makeExpiredSeasonalState();
+  return {
+    ...base,
+    calendars: [
+      { ...base.calendars[0], start_date: ymdFromNow(-365), end_date: ymdFromNow(-45) },
+      base.calendars[1],
+    ],
+  };
+}
+
+/**
+ * A feed whose *first-ranked* pattern is the expired one, on a day when nothing
+ * at all is running: the live pattern is suppressed today by a
+ * calendar_dates exception, so no profile intersects today's services and the
+ * default falls through to profile order — which puts "Weekday" ahead of
+ * "Daily". Without an expiry-aware default the rider opens on a schedule that
+ * stopped running two months ago.
+ *
+ * The exception is what makes this day-independent: a fixture that relied on
+ * "today is a Sunday" would prove nothing six days in seven.
+ */
+function makeExpiredDefaultState(): SnapshotState {
+  const base = makeExpiredSeasonalState();
+  return {
+    ...base,
+    calendars: [
+      { service_id: 'OLDWK', monday: 1, tuesday: 1, wednesday: 1, thursday: 1, friday: 1, saturday: 0, sunday: 0, start_date: ymdFromNow(-400), end_date: ymdFromNow(-60) },
+      { service_id: 'LIVE', monday: 1, tuesday: 1, wednesday: 1, thursday: 1, friday: 1, saturday: 1, sunday: 1, start_date: ymdFromNow(-400), end_date: ymdFromNow(400) },
+    ],
+    calendarDates: [{ service_id: 'LIVE', date: ymdFromNow(0), exception_type: 2 }],
+    trips: [
+      { trip_id: 'ow1', route_id: 'R1', service_id: 'OLDWK', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+      { trip_id: 'lv1', route_id: 'R1', service_id: 'LIVE', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+    ],
+    stopTimes: [
+      { trip_id: 'ow1', arrival_time: '17:33:00', departure_time: '17:33:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'lv1', arrival_time: '09:09:00', departure_time: '09:09:00', stop_id: 's1', stop_sequence: 1 },
+    ],
+  };
+}
+
+/**
+ * Weekday + Saturday over a range that always brackets today, for the date
+ * picker (#73).
+ *
+ * The fixed 2026 range on `makeWeekdaySaturdayState` can't serve here: these
+ * tests navigate to dates a year out, and a fixture whose calendar stops on a
+ * hard-coded day would start reporting "outside the feed's range" for reasons
+ * that have nothing to do with what's under test. Sunday is deliberately left
+ * with no service at all — that's the "you picked a day nothing runs" case.
+ */
+function makeDatePickerState(): SnapshotState {
+  const base = makeWeekdaySaturdayState();
+  const start = ymdFromNow(-30);
+  const end = ymdFromNow(300);
+  return {
+    ...base,
+    feedInfo: { feed_publisher_name: 'EmbedAgency', feed_start_date: start, feed_end_date: end },
+    calendars: base.calendars.map((c) => ({ ...c, start_date: start, end_date: end })),
+  };
+}
+
+/**
+ * Two routes with different service patterns — the shape that broke on
+ * `gorge-valley-transit`, where GVT3 runs only the weekend patterns.
+ *
+ * R1 runs an all-week DAILY service; R2 runs a weekend-only one and nothing
+ * else. On a Saturday BOTH are active feed-wide, and DAILY sorts ahead of
+ * Weekend, so a profile picker that looks at the feed rather than the route
+ * hands R2 a pattern it has no trips on: an empty page under a banner
+ * announcing "Daily schedule in effect", with no way for the rider to reach
+ * the schedule that does exist.
+ */
+function makeRouteScopedState(): SnapshotState {
+  const base = makeFeedState();
+  const start = ymdFromNow(-30);
+  const end = ymdFromNow(300);
+  return {
+    ...base,
+    feedInfo: { feed_publisher_name: 'EmbedAgency', feed_start_date: start, feed_end_date: end },
+    routes: [
+      ...base.routes,
+      { route_id: 'R2', agency_id: 'a1', route_short_name: '2', route_long_name: 'Lakeside', route_type: 3, route_color: '2980b9', route_text_color: 'ffffff' },
+    ],
+    calendars: [
+      { service_id: 'DAILY', monday: 1, tuesday: 1, wednesday: 1, thursday: 1, friday: 1, saturday: 1, sunday: 1, start_date: start, end_date: end },
+      { service_id: 'WKND', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 0, saturday: 1, sunday: 1, start_date: start, end_date: end },
+    ],
+    calendarDates: [],
+    trips: [
+      { trip_id: 'd1', route_id: 'R1', service_id: 'DAILY', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+      { trip_id: 'k1', route_id: 'R2', service_id: 'WKND', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Lakeside' },
+    ],
+    stopTimes: [
+      { trip_id: 'd1', arrival_time: '07:07:00', departure_time: '07:07:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'd1', arrival_time: '07:17:00', departure_time: '07:17:00', stop_id: 's2', stop_sequence: 2 },
+      { trip_id: 'k1', arrival_time: '14:44:00', departure_time: '14:44:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'k1', arrival_time: '14:54:00', departure_time: '14:54:00', stop_id: 's2', stop_sequence: 2 },
+    ],
+  };
+}
+
+/** Departure times unique to each route in the fixture above. */
+const R1_DAILY_TIME = '7:07a';
+const R2_WEEKEND_TIME = '2:44p';
+
 async function createPublishedProject(
   client: TestClient,
   name: string,
@@ -223,9 +452,11 @@ describe('embed routes', () => {
     // for today.
     expect(html).toContain('8:00a');
     expect(html).toContain('8:05a');
-    // Service-day tab labels (multiple profiles → tabs visible).
-    expect(html).toContain('Daily');
-    expect(html).toContain('Saturday');
+    // The rider's service-selection control. This asserted the service-day tab
+    // labels until #73 replaced the tab row with the date picker; which pattern
+    // the banner happens to name depends on the weekday the suite runs, so the
+    // control itself is what's stable to assert here.
+    expect(html).toContain('class="date-picker"');
   });
 
   it('GET /<slug>/embed/route/<id>?view=map renders only the map (no schedule table)', async () => {
@@ -288,11 +519,13 @@ describe('embed routes', () => {
       : { label: 'Weekday', time: WEEKDAY_ONLY_TIME, otherLabel: 'Saturday', otherTime: SATURDAY_ONLY_TIME };
   }
 
-  it('renders a service-day tab per profile for a weekday + saturday feed', async () => {
+  it('renders a service-day tab per profile under ?show_services=1', async () => {
     const client = await loggedInClient('emb-svc-tabs@example.com');
     const { slug } = await createPublishedProject(client, 'EmbedSvcTabs', makeWeekdaySaturdayState());
 
-    const res = await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`);
+    // Behind the reveal since #73 — the tab row is no longer the rider's
+    // control, but it still has to be correct for anyone who asks for it.
+    const res = await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?show_services=1`);
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('class="service-tabs"');
@@ -338,8 +571,9 @@ describe('embed routes', () => {
     const html = await res.text();
     expect(html).toContain(today.time);
     expect(html).not.toContain(today.otherTime);
-    // Still a usable page: tabs render so the rider can pick a real one.
-    expect(html).toContain('class="service-tabs"');
+    // Still a usable page: the date picker renders so the rider can get to
+    // another day's schedule. (Was the tab row before #73 hid it by default.)
+    expect(html).toContain('class="date-picker"');
   });
 
   it('folds the service pin into the ETag so variants cache separately', async () => {
@@ -383,7 +617,7 @@ describe('embed routes', () => {
     const client = await loggedInClient('emb-svc-labels@example.com');
     const { slug } = await createPublishedProject(client, 'EmbedSvcLabels', makeDayPatternState());
 
-    const res = await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`);
+    const res = await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?show_services=1`);
     expect(res.status).toBe(200);
     const html = await res.text();
 
@@ -405,6 +639,705 @@ describe('embed routes', () => {
     // pre-existing rule, deliberately unchanged by the relabelling.
     const profiles = await serviceProfiles(slug);
     expect(profiles.map((p) => p.label)).toEqual(['Fri', 'Mon–Sat', 'Weekend']);
+  });
+
+  // ─── Expired service patterns (issue #71) ──────────────────────────────────
+  //
+  // A pattern whose calendar.txt date range has already ended is not a schedule
+  // any more, but the embed rendered it as one: a clickable tab backed by a
+  // full timetable, with nothing to say the service is over. `renderExpiryWarning`
+  // never caught it — it reads feed_info.feed_end_date, which on the reported
+  // feed was still a year out.
+  //
+  // Riders don't see expired patterns; operators still do (see the API test at
+  // the end of this block). Every fixture here keeps feed_end_date in the future
+  // so the feed-level warning stays silent and the per-profile check is what's
+  // under test.
+  describe('expired service patterns', () => {
+    /** The catalogue as an integrator sees it, including the expiry fields. */
+    async function servicesApi(slug: string) {
+      const res = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1/services`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        services: { id: string; label: string; end_date?: string; expired?: boolean }[];
+      };
+      return body.services;
+    }
+
+    it('hides an expired pattern from the rider’s tabs, and says it did', async () => {
+      const client = await loggedInClient('emb-exp-hide@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpHide', makeExpiredSeasonalState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`)
+      ).text();
+
+      // The live pattern's timetable is what a rider gets; the ended one is
+      // gone from the page entirely.
+      expect(html).toContain(LIVE_ONLY_TIME);
+      expect(html).not.toContain('Weekend');
+      expect(html).not.toContain(SEASONAL_ONLY_TIME);
+      // Since #73 there is no tab row on the default page at all, so there is
+      // no dropped tab to explain — the note that used to say so would now be
+      // describing a row the rider can't see either way.
+      expect(html).not.toContain('class="service-tabs"');
+      expect(html).not.toContain('Past service patterns are hidden');
+
+      // Ask for the tab row and the asymmetry is intact: the ended pattern is
+      // still withheld, and the page says so and offers the way to see it.
+      // Dropping a tab silently would be its own small lie. (No `service-tabs`
+      // nav here — with the ended pattern withheld only one is left, and there
+      // is nothing to switch between; the note carries the explanation.)
+      const tabs = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?show_services=1`)
+      ).text();
+      expect(tabs).not.toContain(SEASONAL_ONLY_TIME);
+      expect(tabs).toContain('Past service patterns are hidden');
+      expect(tabs).toContain('show_expired=1');
+    });
+
+    it('?show_expired=1 brings the expired pattern back, marked as ended', async () => {
+      const client = await loggedInClient('emb-exp-show@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpShow', makeExpiredSeasonalState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?show_expired=1`)
+      ).text();
+
+      expect(html).toContain('Weekend (ended)');
+      expect(html).toContain('>Daily</a>');
+      // Nothing left to hide, so the note retires with it.
+      expect(html).not.toContain('Past service patterns are hidden');
+    });
+
+    it('shows every pattern, plus a warning, when all of them have expired', async () => {
+      const client = await loggedInClient('emb-exp-all@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpAll', makeAllExpiredState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`)
+      ).text();
+
+      // Hiding everything would leave a rider with an empty page, so the
+      // fallback pattern's timetable still renders — and carries the notice.
+      expect(html).toContain('This schedule ended on');
+      expect(html).not.toContain('Past service patterns are hidden');
+      // The feed as a whole has NOT expired, so the feed-level banner is silent
+      // and this warning is the only thing telling the rider.
+      expect(html).not.toContain('Schedule expired');
+
+      // Nothing is suppressed from the tab row either, once it's asked for:
+      // when every pattern has ended there is no live one to prefer.
+      const tabs = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?show_services=1`)
+      ).text();
+      expect(tabs).toContain('Daily (ended)');
+      expect(tabs).toContain('Weekend (ended)');
+      expect(tabs).not.toContain('Past service patterns are hidden');
+    });
+
+    it('honours an explicit ?service= pin at an expired pattern, with the warning', async () => {
+      const client = await loggedInClient('emb-exp-pin@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpPin', makeExpiredSeasonalState());
+
+      const profiles = await servicesApi(slug);
+      const seasonal = profiles.find((p) => p.label === 'Weekend');
+      expect(seasonal).toBeTruthy();
+
+      const html = await (
+        await SELF.fetch(
+          `http://feeds.example.com/${slug}/embed/route/R1?service=${encodeURIComponent(seasonal!.id)}`,
+        )
+      ).text();
+
+      // Someone has this URL pinned in a page: render what they asked for
+      // rather than silently substituting today's service…
+      expect(html).toContain(SEASONAL_ONLY_TIME);
+      expect(html).not.toContain(LIVE_ONLY_TIME);
+      // …and tell them it's over.
+      expect(html).toContain('This schedule ended on');
+
+      // The selected pattern's tab is visible and marked once the row is asked
+      // for — a selected tab missing from its own row reads as a broken page.
+      const tabs = await (
+        await SELF.fetch(
+          `http://feeds.example.com/${slug}/embed/route/R1?service=${encodeURIComponent(seasonal!.id)}&show_services=1`,
+        )
+      ).text();
+      expect(tabs).toContain('Weekend (ended)');
+    });
+
+    it('picks a live pattern as the default even when an expired one sorts first', async () => {
+      const client = await loggedInClient('emb-exp-default@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpDefault', makeExpiredDefaultState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1`)
+      ).text();
+
+      // The live pattern's departures, not the two-month-dead one's.
+      expect(html).toContain(LIVE_ONLY_TIME);
+      expect(html).not.toContain(SEASONAL_ONLY_TIME);
+      expect(html).not.toContain('This schedule ended on');
+    });
+
+    it('publishes expired patterns to the operator API instead of hiding them', async () => {
+      const client = await loggedInClient('emb-exp-api@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpApi', makeExpiredSeasonalState());
+
+      const profiles = await servicesApi(slug);
+      // Deliberately asymmetric with the embed above: an agency pinning a
+      // seasonal pattern needs to see it before its season, and needs to be
+      // able to tell why one vanished from the rider page.
+      expect(profiles.map((p) => p.label)).toEqual(['Daily', 'Weekend']);
+      const live = profiles.find((p) => p.label === 'Daily');
+      const seasonal = profiles.find((p) => p.label === 'Weekend');
+      expect(live?.expired).toBe(false);
+      expect(seasonal?.expired).toBe(true);
+      // …and the date it was judged on, so the picker can label it.
+      expect(seasonal?.end_date).toBe(ymdFromNow(-30));
+      expect(live?.end_date).toBe(ymdFromNow(365));
+    });
+
+    it('caches the hidden and shown variants apart', async () => {
+      const client = await loggedInClient('emb-exp-etag@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpEtag', makeExpiredSeasonalState());
+      const base = `http://feeds.example.com/${slug}/embed/route/R1`;
+
+      const hidden = await SELF.fetch(base);
+      const shown = await SELF.fetch(`${base}?show_expired=1`);
+      const hiddenTag = hidden.headers.get('ETag');
+      expect(hiddenTag).toBeTruthy();
+      expect(shown.headers.get('ETag')).not.toBe(hiddenTag);
+
+      // An edge cache holding the hidden variant must not answer the shown one.
+      const cross = await SELF.fetch(`${base}?show_expired=1`, {
+        headers: { 'If-None-Match': hiddenTag as string },
+      });
+      expect(cross.status).toBe(200);
+      expect(await cross.text()).toContain('Weekend (ended)');
+    });
+
+    it('localizes the hidden-pattern note and the ended warning (es)', async () => {
+      const client = await loggedInClient('emb-exp-i18n@example.com');
+      const { slug } = await createPublishedProject(client, 'EmbedExpI18n', makeAllExpiredState());
+
+      const html = await (
+        await SELF.fetch(`http://feeds.example.com/${slug}/embed/route/R1?lang=es&show_services=1`)
+      ).text();
+      expect(html).toContain('Este horario finalizó el');
+      expect(html).toContain('(finalizado)');
+      expect(html).not.toContain('This schedule ended on');
+    });
+  });
+
+  // ─── Rider date picker (?date=, issue #73) ─────────────────────────────────
+  //
+  // The date picker replaced the service-day tabs as the rider's way to reach a
+  // pattern that isn't today's. The tabs are gone from the page by default;
+  // `?date=` is what selects a pattern now, and it is *navigation state a rider
+  // sets*, never something an agency bakes into a snippet — see the
+  // embedOptions test asserting the snippet builder can't emit one.
+  describe('date picker', () => {
+    const R1 = (slug: string) => `http://feeds.example.com/${slug}/embed/route/R1`;
+    const get = async (u: string) => (await SELF.fetch(u)).text();
+
+    async function pickerProject(email: string, name: string) {
+      const client = await loggedInClient(email);
+      return createPublishedProject(client, name, makeDatePickerState());
+    }
+
+    it('defaults to today’s service, with no date in the URL and the picker on today', async () => {
+      const { slug } = await pickerProject('emb-dp-default@example.com', 'EmbedDpDefault');
+
+      const res = await SELF.fetch(R1(slug));
+      expect(res.status).toBe(200);
+      const html = await res.text();
+
+      // Whichever weekday the suite runs on, the cold page shows that day's
+      // pattern — Sunday has no service in this fixture, so it shows neither.
+      const dow = dowOf(ymdFromNow(0));
+      if (dow === 0) expect(html).toContain('No service today');
+      else if (dow === 6) expect(html).toContain(SATURDAY_ONLY_TIME);
+      else expect(html).toContain(WEEKDAY_ONLY_TIME);
+
+      // The picker is present and pointed at today, and the page it renders is
+      // reachable without any date param at all.
+      expect(html).toContain('class="date-picker"');
+      expect(html).toContain(`value="${ymdToInput(ymdFromNow(0))}"`);
+      expect(html).toContain('<strong>Today is');
+    });
+
+    it('?date= selects the pattern for that date, not today’s', async () => {
+      const { slug } = await pickerProject('emb-dp-select@example.com', 'EmbedDpSelect');
+
+      // Asserted in both directions in one test on purpose: today can only be
+      // one weekday, so a build that ignores `date` and renders today's pattern
+      // fails one of these two halves whichever day it runs.
+      const sat = await get(`${R1(slug)}?date=${ymdToInput(nextDow(6))}`);
+      expect(sat).toContain(SATURDAY_ONLY_TIME);
+      expect(sat).not.toContain(WEEKDAY_ONLY_TIME);
+
+      const wed = await get(`${R1(slug)}?date=${ymdToInput(nextDow(3))}`);
+      expect(wed).toContain(WEEKDAY_ONLY_TIME);
+      expect(wed).not.toContain(SATURDAY_ONLY_TIME);
+    });
+
+    it('names the selected day instead of claiming it is today', async () => {
+      const { slug } = await pickerProject('emb-dp-banner@example.com', 'EmbedDpBanner');
+
+      // A page headed "Today is …" over next week's timetable is worse than no
+      // heading, so the lead clause has to follow the date.
+      const wed = nextDow(3);
+      const other = dowOf(ymdFromNow(0)) === 3 ? nextDow(4) : wed;
+      const html = await get(`${R1(slug)}?date=${ymdToInput(other)}`);
+      expect(html).not.toContain('<strong>Today is');
+      expect(html).toContain(`value="${ymdToInput(other)}"`);
+    });
+
+    it('does not render the service-day tabs by default', async () => {
+      const { slug } = await pickerProject('emb-dp-notabs@example.com', 'EmbedDpNoTabs');
+
+      const html = await get(R1(slug));
+      // The whole point of the picker: one control, not two.
+      expect(html).not.toContain('class="service-tabs"');
+      expect(html).toContain('class="date-picker"');
+    });
+
+    it('?show_services=1 puts the tab row back for diagnosis', async () => {
+      const { slug } = await pickerProject('emb-dp-showtabs@example.com', 'EmbedDpShowTabs');
+
+      const html = await get(`${R1(slug)}?show_services=1`);
+      expect(html).toContain('class="service-tabs"');
+      expect(html).toContain('>Weekday</a>');
+      expect(html).toContain('>Saturday</a>');
+    });
+
+    it('explains a date this route does not run, and offers the next one', async () => {
+      const { slug } = await pickerProject('emb-dp-noservice@example.com', 'EmbedDpNoService');
+
+      // Sunday: inside the feed's range, but nothing runs.
+      const html = await get(`${R1(slug)}?date=${ymdToInput(nextDow(0))}`);
+      expect(html).toContain('No service on this date');
+      // Not an unexplained empty table, and not some other day's timetable
+      // rendered under a "no service" banner.
+      expect(html).not.toContain('table class="schedule"');
+      expect(html).not.toContain(WEEKDAY_ONLY_TIME);
+      expect(html).not.toContain(SATURDAY_ONLY_TIME);
+      // A dead end with a date picker on it is still a dead end — Monday runs.
+      expect(html).toContain('Next service');
+      expect(html).toContain(`date=${ymdToInput(nextDow(1))}`);
+      // In range, so the coverage sentence stays out of the way.
+      expect(html).not.toContain('This schedule covers');
+    });
+
+    it('tells a date outside the feed’s calendar apart from a day with no service', async () => {
+      const { slug } = await pickerProject('emb-dp-range@example.com', 'EmbedDpRange');
+
+      // 400 days out — past this fixture's calendar end at +300. "The bus
+      // doesn't run then" would be a claim nobody can make.
+      const html = await get(`${R1(slug)}?date=${ymdToInput(ymdFromNow(400))}`);
+      expect(html).toContain('This schedule covers');
+      expect(html).not.toContain('table class="schedule"');
+      // Nothing ahead of it, so no next-service link to offer.
+      expect(html).not.toContain('Next service');
+    });
+
+    it('bounds the input to the feed’s calendar range', async () => {
+      const { slug } = await pickerProject('emb-dp-bounds@example.com', 'EmbedDpBounds');
+
+      const html = await get(R1(slug));
+      expect(html).toContain(`min="${ymdToInput(ymdFromNow(-30))}"`);
+      expect(html).toContain(`max="${ymdToInput(ymdFromNow(300))}"`);
+    });
+
+    it('falls back to today for a date that isn’t one, instead of erroring', async () => {
+      const { slug } = await pickerProject('emb-dp-bad@example.com', 'EmbedDpBad');
+
+      // Syntactically fine, doesn't exist. Date.UTC would roll it into March.
+      const res = await SELF.fetch(`${R1(slug)}?date=2026-02-30`);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain(`value="${ymdToInput(ymdFromNow(0))}"`);
+      expect(html).toContain('<strong>Today is');
+      expect(html).not.toContain('No service on this date');
+    });
+
+    it('lets an explicit date outrank a pinned ?service=', async () => {
+      const { slug } = await pickerProject('emb-dp-precedence@example.com', 'EmbedDpPrecedence');
+
+      const profiles = await serviceProfiles(slug);
+      const saturday = profiles.find((p) => p.label === 'Saturday');
+      expect(saturday).toBeTruthy();
+
+      // The pin is where the page starts; the date is what the rider did next.
+      // Honouring the pin here would make the picker a control that does nothing.
+      const html = await get(
+        `${R1(slug)}?service=${encodeURIComponent(saturday!.id)}&date=${ymdToInput(nextDow(3))}`,
+      );
+      expect(html).toContain(WEEKDAY_ONLY_TIME);
+      expect(html).not.toContain(SATURDAY_ONLY_TIME);
+    });
+
+    it('drops the service pin when a date is submitted, and carries the theme', async () => {
+      const { slug } = await pickerProject('emb-dp-form@example.com', 'EmbedDpForm');
+
+      const profiles = await serviceProfiles(slug);
+      const html = await get(
+        `${R1(slug)}?service=${encodeURIComponent(profiles[0].id)}&lang=es&theme=dark`,
+      );
+      expect(html).toContain('class="date-picker"');
+      // A GET form replaces the query with exactly its own fields, so the
+      // hidden-input list IS the definition of what survives picking a date.
+      expect(html).toContain('name="lang"');
+      expect(html).toContain('name="theme"');
+      expect(html).not.toContain('name="service"');
+    });
+
+    it('folds the selected date into the ETag so dates cache apart', async () => {
+      const { slug } = await pickerProject('emb-dp-etag@example.com', 'EmbedDpEtag');
+
+      const sat = await SELF.fetch(`${R1(slug)}?date=${ymdToInput(nextDow(6))}`);
+      const wed = await SELF.fetch(`${R1(slug)}?date=${ymdToInput(nextDow(3))}`);
+      const satTag = sat.headers.get('ETag');
+      expect(satTag).toBeTruthy();
+      expect(wed.headers.get('ETag')).not.toBe(satTag);
+
+      // An edge cache holding Saturday must not answer Wednesday — that would
+      // hand a rider a timetable for a day they didn't ask about.
+      const cross = await SELF.fetch(`${R1(slug)}?date=${ymdToInput(nextDow(3))}`, {
+        headers: { 'If-None-Match': satTag as string },
+      });
+      expect(cross.status).toBe(200);
+      expect(await cross.text()).toContain(WEEKDAY_ONLY_TIME);
+    });
+
+    // ─── Route-scoped profile selection ──────────────────────────────────────
+    //
+    // Regression: the date resolved to a profile by looking at the whole feed,
+    // so on `gorge-valley-transit` a Saturday on GVT3 — which runs only the
+    // weekend patterns — landed on "Daily", a pattern that route has no trips
+    // on. The rider got an empty page under a banner announcing a schedule was
+    // in effect, and with the tab row hidden there was no way to reach the
+    // timetable that did exist.
+    //
+    // The selection bug predates the picker (pickDefaultProfile was always
+    // feed-wide), but hiding the tabs turned a recoverable annoyance into a
+    // dead end, so it belongs to this change.
+    async function routeScopedProject(email: string, name: string) {
+      const client = await loggedInClient(email);
+      return createPublishedProject(client, name, makeRouteScopedState());
+    }
+
+    it('picks a pattern THIS route runs, not the feed’s most popular one', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-sat@example.com', 'EmbedDpRsSat');
+
+      // Saturday: DAILY and WKND are both active feed-wide, and DAILY sorts
+      // first. R2 runs only WKND, so a feed-wide pick renders nothing here.
+      const html = await get(
+        `http://feeds.example.com/${slug}/embed/route/R2?date=${ymdToInput(nextDow(6))}`,
+      );
+      expect(html).toContain(R2_WEEKEND_TIME);
+      // The banner must not announce a pattern this route doesn't operate.
+      expect(html).not.toContain('Daily schedule in effect');
+      // And it's a real timetable, not the empty-schedule placeholder.
+      expect(html).toContain('table class="schedule"');
+      expect(html).not.toContain('No trips scheduled');
+    });
+
+    it('explains a weekday on a weekend-only route instead of rendering nothing', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-wed@example.com', 'EmbedDpRsWed');
+
+      // The network runs (DAILY is active) but R2 doesn't. This is the case the
+      // explanation exists for, and it has to beat "empty table, no notice".
+      const html = await get(
+        `http://feeds.example.com/${slug}/embed/route/R2?date=${ymdToInput(nextDow(3))}`,
+      );
+      expect(html).toContain('No service on this date');
+      expect(html).toContain('Next service');
+      // The next weekend day after that Wednesday — NOT simply the next
+      // Saturday from today, which can fall before it.
+      expect(html).toContain(`date=${ymdToInput(weekendOnOrAfter(nextDow(3)))}`);
+      expect(html).not.toContain('table class="schedule"');
+      expect(html).not.toContain('Daily schedule in effect');
+    });
+
+    it('scopes the no-date default page to the route too', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-def@example.com', 'EmbedDpRsDef');
+
+      // Same bug, reachable with no date param at all: on a Saturday the cold
+      // page for R2 picked DAILY. Asserted for whichever day the suite runs, so
+      // this can't pass by landing on a convenient weekday.
+      const html = await get(`http://feeds.example.com/${slug}/embed/route/R2`);
+      expect(html).not.toContain('Daily schedule in effect');
+      const weekend = dowOf(ymdFromNow(0)) === 0 || dowOf(ymdFromNow(0)) === 6;
+      if (weekend) expect(html).toContain(R2_WEEKEND_TIME);
+      else expect(html).toContain('No service today');
+    });
+
+    it('scopes the revealed tab row to the route’s own patterns', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-tabs@example.com', 'EmbedDpRsTabs');
+
+      // A tab for a pattern the route doesn't run is a link to an empty table —
+      // the same trap servicePinApplies() already guards the snippet against.
+      const html = await get(`http://feeds.example.com/${slug}/embed/route/R2?show_services=1`);
+      expect(html).not.toContain('>Daily</a>');
+
+      // R1's page is the mirror image, which is what proves the filter is
+      // per-route rather than just dropping the first profile.
+      const r1 = await get(`http://feeds.example.com/${slug}/embed/route/R1?show_services=1`);
+      expect(r1).not.toContain('>Weekend</a>');
+      expect(r1).toContain(R1_DAILY_TIME);
+    });
+
+    it('shows every pattern running on the date, not just the one that sorts first', async () => {
+      const client = await loggedInClient('emb-dp-overlap@example.com');
+      // Two weekend patterns with overlapping windows — the `gorge-valley-transit`
+      // shape, where GVT3 runs both a May 9–Dec 27 weekend service and a
+      // May 9–Jun 7 one. Inside the overlap BOTH run, but the profile tie-break
+      // returns exactly one, so the shorter pattern's trips were unreachable by
+      // any date at all once the tab row came off the page.
+      const start = ymdFromNow(-30);
+      const shortEnd = ymdFromNow(20);
+      const longEnd = ymdFromNow(300);
+      const state: SnapshotState = {
+        ...makeFeedState(),
+        feedInfo: { feed_publisher_name: 'EmbedAgency', feed_start_date: start, feed_end_date: longEnd },
+        calendars: [
+          { service_id: 'WKNDLONG', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 0, saturday: 1, sunday: 1, start_date: start, end_date: longEnd },
+          { service_id: 'WKNDSHORT', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 0, saturday: 1, sunday: 1, start_date: start, end_date: shortEnd },
+        ],
+        calendarDates: [],
+        trips: [
+          { trip_id: 'wl1', route_id: 'R1', service_id: 'WKNDLONG', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+          { trip_id: 'ws1', route_id: 'R1', service_id: 'WKNDSHORT', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+        ],
+        stopTimes: [
+          { trip_id: 'wl1', arrival_time: '08:08:00', departure_time: '08:08:00', stop_id: 's1', stop_sequence: 1 },
+          { trip_id: 'ws1', arrival_time: '16:16:00', departure_time: '16:16:00', stop_id: 's1', stop_sequence: 1 },
+        ],
+      };
+      const { slug } = await createPublishedProject(client, 'EmbedDpOverlap', state);
+
+      // A weekend date inside the overlap: both patterns run, so both belong on
+      // the page. This is what makes "a June date and a September date show
+      // different schedules" true rather than coincidence.
+      const inOverlap = weekendOnOrAfter(ymdFromNow(1));
+      const both = await get(
+        `http://feeds.example.com/${slug}/embed/route/R1?date=${ymdToInput(inOverlap)}`,
+      );
+      expect(both).toContain('8:08a');
+      expect(both).toContain('4:16p');
+
+      // A weekend date after the short pattern ended: only the long one runs.
+      const afterShort = weekendOnOrAfter(ymdFromNow(60));
+      const one = await get(
+        `http://feeds.example.com/${slug}/embed/route/R1?date=${ymdToInput(afterShort)}`,
+      );
+      expect(one).toContain('8:08a');
+      expect(one).not.toContain('4:16p');
+    });
+
+    it('scopes tabs to exactly the profiles the API lists for that route', async () => {
+      const client = await loggedInClient('emb-dp-parity@example.com');
+      // Two routes with overlapping-but-different pattern sets, so "same as the
+      // API" is a real claim: dropping the filter, or hard-coding it to the
+      // wrong route, changes one of these two lists.
+      const start = ymdFromNow(-30);
+      const end = ymdFromNow(300);
+      const cal = (id: string, days: number[]) => ({
+        service_id: id,
+        monday: days[1] as 0 | 1, tuesday: days[2] as 0 | 1, wednesday: days[3] as 0 | 1,
+        thursday: days[4] as 0 | 1, friday: days[5] as 0 | 1, saturday: days[6] as 0 | 1,
+        sunday: days[0] as 0 | 1,
+        start_date: start, end_date: end,
+      });
+      const state: SnapshotState = {
+        ...makeFeedState(),
+        feedInfo: { feed_publisher_name: 'EmbedAgency', feed_start_date: start, feed_end_date: end },
+        routes: [
+          ...makeFeedState().routes,
+          { route_id: 'R2', agency_id: 'a1', route_short_name: '2', route_long_name: 'Lakeside', route_type: 3, route_color: '2980b9', route_text_color: 'ffffff' },
+        ],
+        calendars: [
+          cal('WKDY', [0, 1, 1, 1, 1, 1, 0]),
+          cal('SAT', [0, 0, 0, 0, 0, 0, 1]),
+          cal('SUN', [1, 0, 0, 0, 0, 0, 0]),
+        ],
+        calendarDates: [],
+        trips: [
+          { trip_id: 'a1t', route_id: 'R1', service_id: 'WKDY', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+          { trip_id: 'a2t', route_id: 'R1', service_id: 'SAT', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+          { trip_id: 'b1t', route_id: 'R2', service_id: 'SAT', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Lakeside' },
+          { trip_id: 'b2t', route_id: 'R2', service_id: 'SUN', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Lakeside' },
+        ],
+        stopTimes: ['a1t', 'a2t', 'b1t', 'b2t'].map((id) => ({
+          trip_id: id, arrival_time: '09:00:00', departure_time: '09:00:00', stop_id: 's1', stop_sequence: 1,
+        })),
+      };
+      const { slug } = await createPublishedProject(client, 'EmbedDpParity', state);
+
+      const res = await SELF.fetch(`http://feeds.example.com/${slug}/api/v1/services`);
+      const body = (await res.json()) as {
+        services: { label: string; route_ids: string[] }[];
+      };
+
+      // api.ts documents route_ids as existing "so a caller can offer only the
+      // patterns that mean something for a given route". route.ts is that
+      // caller; this asserts it stayed that caller.
+      for (const routeId of ['R1', 'R2']) {
+        const html = await get(
+          `http://feeds.example.com/${slug}/embed/route/${routeId}?show_services=1`,
+        );
+        for (const svc of body.services) {
+          const tab = `>${svc.label}</a>`;
+          if (svc.route_ids.includes(routeId)) expect(html).toContain(tab);
+          else expect(html).not.toContain(tab);
+        }
+      }
+
+      // Guards the guard: the two routes really do differ, so a filter that
+      // returned everything (or nothing) can't satisfy the loop above.
+      expect(body.services.find((s) => s.label === 'Weekday')?.route_ids).toEqual(['R1']);
+      expect(body.services.find((s) => s.label === 'Sunday')?.route_ids).toEqual(['R2']);
+      expect(body.services.find((s) => s.label === 'Saturday')?.route_ids).toEqual(['R1', 'R2']);
+    });
+
+    it('still honours a ?service= pin at a pattern the route does not run', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-pin@example.com', 'EmbedDpRsPin');
+
+      // Route-scoping the *automatic* pick must not start overriding an
+      // explicit pin — an agency with this URL in a live page is owed what it
+      // asked for, empty or not, rather than a silent substitution.
+      const profiles = await serviceProfiles(slug);
+      const daily = profiles.find((p) => p.label === 'Daily');
+      expect(daily).toBeTruthy();
+      const html = await get(
+        `http://feeds.example.com/${slug}/embed/route/R2?service=${encodeURIComponent(daily!.id)}`,
+      );
+      expect(html).not.toContain(R2_WEEKEND_TIME);
+      expect(html).toContain('No trips scheduled');
+    });
+
+    it('localizes the picker and the no-service answer (es)', async () => {
+      const { slug } = await pickerProject('emb-dp-i18n@example.com', 'EmbedDpI18n');
+
+      const html = await get(`${R1(slug)}?date=${ymdToInput(nextDow(0))}&lang=es`);
+      expect(html).toContain('Sin servicio en esta fecha');
+      expect(html).toContain('Próximo servicio');
+      expect(html).toContain('Ver el horario de una fecha');
+      expect(html).not.toContain('No service on this date');
+    });
+
+    // ─── Auto-submit (the "Go" button is gone for anyone running JS) ──────────
+    //
+    // Picking a date now navigates on its own. The button it replaced was the
+    // *only* thing that made this control work, so the tests that matter are
+    // the ones proving it still works when the replacement can't run: the
+    // markup must keep a real submit button for no-JS clients, and the script
+    // that hides it must be the same script that installs the handler. See
+    // renderDatePicker() in worker/embeds/route.ts for why they're coupled.
+    describe('auto-submit', () => {
+      it('keeps a real submit button in the markup for clients without JS', async () => {
+        const { slug } = await pickerProject('emb-dp-nojs@example.com', 'EmbedDpNoJs');
+
+        const html = await get(R1(slug));
+        // Not `<noscript>`-wrapped: the button ships in the DOM and the
+        // enhancement script removes it. A script that fails to run for any
+        // reason — CSP, a parse error, an ad blocker — then leaves a working
+        // form behind instead of an inert date field.
+        expect(html).toContain('<button type="submit">Go</button>');
+        expect(html).not.toContain('<noscript><button');
+        // Still a plain GET form, so the button still means something.
+        expect(html).toContain('<form class="date-picker" method="get">');
+      });
+
+      it('installs the handler and hides the button from the same script', async () => {
+        const { slug } = await pickerProject('emb-dp-handler@example.com', 'EmbedDpHandler');
+
+        const html = await get(R1(slug));
+        const script = pickerScript(html);
+
+        // The whole no-JS argument rests on these two living together: if the
+        // button were hidden by CSS or `<noscript>` instead, a script that
+        // didn't run would leave a control with no way to submit at all.
+        expect(script).toContain('addEventListener');
+        expect(script).toContain('hidden = true');
+        expect(script).toContain('requestSubmit');
+      });
+
+      it('guards the submit against the part-typed values a date input emits', async () => {
+        const { slug } = await pickerProject('emb-dp-partial@example.com', 'EmbedDpPartial');
+
+        const script = pickerScript(await get(R1(slug)));
+
+        // Chrome fires `change` on *every* keystroke in the year segment, so
+        // typing "2026" emits 0002-, 0020- and 0202- before the real value.
+        // The floor rejects all three (and '' from a cleared field) by string
+        // order, which works because the value is always zero-padded YYYY-MM-DD.
+        expect(script).toContain("'1000-01-01'");
+        // And a mid-edit month digit ("1" on the way to "12") is well-formed,
+        // so a floor alone can't catch it — typing has to settle first.
+        expect(script).toContain('setTimeout');
+        expect(script).toContain('clearTimeout');
+      });
+
+      it('drives the auto-submit off change, not input', async () => {
+        const { slug } = await pickerProject('emb-dp-change@example.com', 'EmbedDpChange');
+
+        const script = pickerScript(await get(R1(slug)));
+        // `input` fires on the same keystrokes but also on picker scrubbing;
+        // `change` is the committed-value event every browser fires when a day
+        // is chosen from the native calendar. Binding both would double-fire.
+        // Matched as a binding, not a bare token, so the `input[type=date]`
+        // selector elsewhere in the script can neither satisfy nor break it.
+        expect(script).toMatch(/addEventListener\(\s*['"]change['"]/);
+        expect(script).not.toMatch(/addEventListener\(\s*['"]input['"]/);
+      });
+
+      it('tells screen-reader users the schedule updates on its own', async () => {
+        const { slug } = await pickerProject('emb-dp-a11y@example.com', 'EmbedDpA11y');
+
+        const html = await get(R1(slug));
+        // WCAG 3.2.2 wants the change of context advertised *before* the
+        // control is used. The script that creates the behaviour is what
+        // rewrites the label, so the promise can't outlive the behaviour.
+        expect(html).toContain('The schedule updates when you pick a date');
+        expect(pickerScript(html)).toContain('aria-label');
+        // The markup's own label stays accurate for the no-JS button path.
+        expect(html).toContain('aria-label="Show the schedule for a date"');
+      });
+
+      it('localizes the auto-update advisory (fr)', async () => {
+        const { slug } = await pickerProject('emb-dp-a11y-fr@example.com', 'EmbedDpA11yFr');
+
+        const html = await get(`${R1(slug)}?lang=fr`);
+        expect(html).toContain('L’horaire se met à jour lorsque vous choisissez une date');
+        expect(html).not.toContain('The schedule updates when you pick a date');
+      });
+
+      it('leaves the carried params exactly as they were', async () => {
+        const { slug } = await pickerProject('emb-dp-carry@example.com', 'EmbedDpCarry');
+
+        // Characterisation, not new behaviour: auto-submit changes *when* the
+        // form is submitted, never what it submits. A GET form replaces the
+        // query wholesale, so this hidden list is the whole contract — and it
+        // is the thing most easily broken by editing the picker's markup.
+        // Mutation-tested by deleting each name from PICKER_CARRY_PARAMS.
+        const html = await get(
+          `${R1(slug)}?theme=dark&lang=es&accent=00aa88&font=serif&show_services=1`,
+        );
+        expect(html).toContain('<input type="hidden" name="accent" value="00aa88" />');
+        expect(html).toContain('<input type="hidden" name="theme" value="dark" />');
+        expect(html).toContain('<input type="hidden" name="font" value="serif" />');
+        expect(html).toContain('<input type="hidden" name="lang" value="es" />');
+        expect(html).toContain('<input type="hidden" name="show_services" value="1" />');
+        // The pin is still deliberately dropped, and the date still comes from
+        // the visible input rather than a second, hidden copy of itself.
+        expect(html).not.toContain('name="service"');
+        expect(html).not.toContain('<input type="hidden" name="date"');
+      });
+    });
   });
 
   it('GET /widgets.js serves the web-component loader (origin-level, no slug)', async () => {
