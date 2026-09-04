@@ -162,6 +162,12 @@ const STYLES = `
     cursor: pointer;
   }
   .date-picker button:hover { background: #fdf3e3; }
+  /* The picker's submit button is removed by its own enhancement script (see
+     renderDatePicker in embeds/route.ts), which sets [hidden]. The UA
+     stylesheet already gives that display:none, but it is the weakest rule in
+     the cascade — this makes a future display: rule on .date-picker button
+     unable to resurrect a button the script has retired. */
+  .date-picker button[hidden] { display: none; }
   /* The answers a chosen date gets when it isn't a timetable — each on its own
      line so "no service" and the way out of it don't run together. */
   .empty .next-service { display: block; margin-top: 6px; }

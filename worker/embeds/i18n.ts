@@ -55,7 +55,13 @@ export interface EmbedStrings {
   // Intl.DateTimeFormat in the request's language (worker/embeds/route.ts), so
   // weekday and month names localize without five hand-written month tables.
   showScheduleForDate: string;
+  // `go` labels the submit button, which only clients without JavaScript ever
+  // see — everyone else gets the auto-submit, and `dateAutoUpdates` is appended
+  // to the input's accessible name so a screen reader announces the navigation
+  // before the rider triggers it (WCAG 3.2.2). Both strings are still needed:
+  // the button is what the no-JS path submits with.
   go: string;
+  dateAutoUpdates: string;
   noServiceOnDate: string;
   nextServiceOn: (date: string) => string;
   scheduleCovers: (start: string, end: string) => string;
@@ -93,6 +99,7 @@ const EN: EmbedStrings = {
   endedLabel: 'ended',
   showScheduleForDate: 'Show the schedule for a date',
   go: 'Go',
+  dateAutoUpdates: 'The schedule updates when you pick a date',
   noServiceOnDate: 'No service on this date.',
   nextServiceOn: (date) => `Next service: ${date}`,
   scheduleCovers: (start, end) => `This schedule covers ${start} – ${end}.`,
@@ -128,6 +135,7 @@ const ES: EmbedStrings = {
   endedLabel: 'finalizado',
   showScheduleForDate: 'Ver el horario de una fecha',
   go: 'Ir',
+  dateAutoUpdates: 'El horario se actualiza al elegir una fecha',
   noServiceOnDate: 'Sin servicio en esta fecha.',
   nextServiceOn: (date) => `Próximo servicio: ${date}`,
   scheduleCovers: (start, end) => `Este horario cubre del ${start} al ${end}.`,
@@ -163,6 +171,7 @@ const FR: EmbedStrings = {
   endedLabel: 'terminé',
   showScheduleForDate: 'Afficher l’horaire d’une date',
   go: 'Valider',
+  dateAutoUpdates: 'L’horaire se met à jour lorsque vous choisissez une date',
   noServiceOnDate: 'Pas de service à cette date.',
   nextServiceOn: (date) => `Prochain service : ${date}`,
   scheduleCovers: (start, end) => `Cet horaire couvre du ${start} au ${end}.`,
@@ -198,6 +207,7 @@ const DE: EmbedStrings = {
   endedLabel: 'beendet',
   showScheduleForDate: 'Fahrplan für ein Datum anzeigen',
   go: 'Anzeigen',
+  dateAutoUpdates: 'Der Fahrplan wird aktualisiert, sobald Sie ein Datum wählen',
   noServiceOnDate: 'An diesem Tag kein Service.',
   nextServiceOn: (date) => `Nächster Verkehrstag: ${date}`,
   scheduleCovers: (start, end) => `Dieser Fahrplan gilt vom ${start} bis zum ${end}.`,
@@ -233,6 +243,7 @@ const PT: EmbedStrings = {
   endedLabel: 'encerrado',
   showScheduleForDate: 'Ver o horário de uma data',
   go: 'Ir',
+  dateAutoUpdates: 'O horário é atualizado ao escolher uma data',
   noServiceOnDate: 'Sem serviço nesta data.',
   nextServiceOn: (date) => `Próximo serviço: ${date}`,
   scheduleCovers: (start, end) => `Este horário abrange de ${start} a ${end}.`,

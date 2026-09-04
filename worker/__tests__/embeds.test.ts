@@ -176,6 +176,23 @@ function ymdToInput(ymd: string): string {
   return `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`;
 }
 
+/**
+ * The date picker's own enhancement script, isolated from the page's other
+ * inline scripts (the Mapbox init, the impression beacon) so an assertion about
+ * the picker can't be satisfied by a coincidence somewhere else in the page.
+ */
+function pickerScript(html: string): string {
+  // `(?!</script>)` keeps the lazy runs from spilling across a script boundary
+  // into the map's IIFE, which would let a map-only token satisfy an assertion
+  // that is supposed to be about the picker.
+  const body = String.raw`(?:(?!<\/script>)[\s\S])*?`;
+  const m = new RegExp(
+    String.raw`<script>\s*(\(function \(\) \{${body}date-picker${body}\}\)\(\);?)\s*<\/script>`,
+  ).exec(html);
+  if (!m) throw new Error('no date-picker script found in the embed HTML');
+  return m[1];
+}
+
 /** Weekday index (0 = Sunday) of a YYYYMMDD calendar date. */
 function dowOf(ymd: string): number {
   return new Date(
@@ -1210,6 +1227,116 @@ describe('embed routes', () => {
       expect(html).toContain('Próximo servicio');
       expect(html).toContain('Ver el horario de una fecha');
       expect(html).not.toContain('No service on this date');
+    });
+
+    // ─── Auto-submit (the "Go" button is gone for anyone running JS) ──────────
+    //
+    // Picking a date now navigates on its own. The button it replaced was the
+    // *only* thing that made this control work, so the tests that matter are
+    // the ones proving it still works when the replacement can't run: the
+    // markup must keep a real submit button for no-JS clients, and the script
+    // that hides it must be the same script that installs the handler. See
+    // renderDatePicker() in worker/embeds/route.ts for why they're coupled.
+    describe('auto-submit', () => {
+      it('keeps a real submit button in the markup for clients without JS', async () => {
+        const { slug } = await pickerProject('emb-dp-nojs@example.com', 'EmbedDpNoJs');
+
+        const html = await get(R1(slug));
+        // Not `<noscript>`-wrapped: the button ships in the DOM and the
+        // enhancement script removes it. A script that fails to run for any
+        // reason — CSP, a parse error, an ad blocker — then leaves a working
+        // form behind instead of an inert date field.
+        expect(html).toContain('<button type="submit">Go</button>');
+        expect(html).not.toContain('<noscript><button');
+        // Still a plain GET form, so the button still means something.
+        expect(html).toContain('<form class="date-picker" method="get">');
+      });
+
+      it('installs the handler and hides the button from the same script', async () => {
+        const { slug } = await pickerProject('emb-dp-handler@example.com', 'EmbedDpHandler');
+
+        const html = await get(R1(slug));
+        const script = pickerScript(html);
+
+        // The whole no-JS argument rests on these two living together: if the
+        // button were hidden by CSS or `<noscript>` instead, a script that
+        // didn't run would leave a control with no way to submit at all.
+        expect(script).toContain('addEventListener');
+        expect(script).toContain('hidden = true');
+        expect(script).toContain('requestSubmit');
+      });
+
+      it('guards the submit against the part-typed values a date input emits', async () => {
+        const { slug } = await pickerProject('emb-dp-partial@example.com', 'EmbedDpPartial');
+
+        const script = pickerScript(await get(R1(slug)));
+
+        // Chrome fires `change` on *every* keystroke in the year segment, so
+        // typing "2026" emits 0002-, 0020- and 0202- before the real value.
+        // The floor rejects all three (and '' from a cleared field) by string
+        // order, which works because the value is always zero-padded YYYY-MM-DD.
+        expect(script).toContain("'1000-01-01'");
+        // And a mid-edit month digit ("1" on the way to "12") is well-formed,
+        // so a floor alone can't catch it — typing has to settle first.
+        expect(script).toContain('setTimeout');
+        expect(script).toContain('clearTimeout');
+      });
+
+      it('drives the auto-submit off change, not input', async () => {
+        const { slug } = await pickerProject('emb-dp-change@example.com', 'EmbedDpChange');
+
+        const script = pickerScript(await get(R1(slug)));
+        // `input` fires on the same keystrokes but also on picker scrubbing;
+        // `change` is the committed-value event every browser fires when a day
+        // is chosen from the native calendar. Binding both would double-fire.
+        // Matched as a binding, not a bare token, so the `input[type=date]`
+        // selector elsewhere in the script can neither satisfy nor break it.
+        expect(script).toMatch(/addEventListener\(\s*['"]change['"]/);
+        expect(script).not.toMatch(/addEventListener\(\s*['"]input['"]/);
+      });
+
+      it('tells screen-reader users the schedule updates on its own', async () => {
+        const { slug } = await pickerProject('emb-dp-a11y@example.com', 'EmbedDpA11y');
+
+        const html = await get(R1(slug));
+        // WCAG 3.2.2 wants the change of context advertised *before* the
+        // control is used. The script that creates the behaviour is what
+        // rewrites the label, so the promise can't outlive the behaviour.
+        expect(html).toContain('The schedule updates when you pick a date');
+        expect(pickerScript(html)).toContain('aria-label');
+        // The markup's own label stays accurate for the no-JS button path.
+        expect(html).toContain('aria-label="Show the schedule for a date"');
+      });
+
+      it('localizes the auto-update advisory (fr)', async () => {
+        const { slug } = await pickerProject('emb-dp-a11y-fr@example.com', 'EmbedDpA11yFr');
+
+        const html = await get(`${R1(slug)}?lang=fr`);
+        expect(html).toContain('L’horaire se met à jour lorsque vous choisissez une date');
+        expect(html).not.toContain('The schedule updates when you pick a date');
+      });
+
+      it('leaves the carried params exactly as they were', async () => {
+        const { slug } = await pickerProject('emb-dp-carry@example.com', 'EmbedDpCarry');
+
+        // Characterisation, not new behaviour: auto-submit changes *when* the
+        // form is submitted, never what it submits. A GET form replaces the
+        // query wholesale, so this hidden list is the whole contract — and it
+        // is the thing most easily broken by editing the picker's markup.
+        // Mutation-tested by deleting each name from PICKER_CARRY_PARAMS.
+        const html = await get(
+          `${R1(slug)}?theme=dark&lang=es&accent=00aa88&font=serif&show_services=1`,
+        );
+        expect(html).toContain('<input type="hidden" name="accent" value="00aa88" />');
+        expect(html).toContain('<input type="hidden" name="theme" value="dark" />');
+        expect(html).toContain('<input type="hidden" name="font" value="serif" />');
+        expect(html).toContain('<input type="hidden" name="lang" value="es" />');
+        expect(html).toContain('<input type="hidden" name="show_services" value="1" />');
+        // The pin is still deliberately dropped, and the date still comes from
+        // the visible input rather than a second, hidden copy of itself.
+        expect(html).not.toContain('name="service"');
+        expect(html).not.toContain('<input type="hidden" name="date"');
+      });
     });
   });
 

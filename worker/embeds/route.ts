@@ -1,4 +1,4 @@
-import { html } from 'hono/html';
+import { html, raw } from 'hono/html';
 import type { Env } from '../env';
 import type { Calendar, CalendarDate } from './types';
 import { loadEmbedFeed } from './loader';
@@ -457,12 +457,8 @@ function renderDayBanner(opts: {
 }
 
 /**
- * The date picker: a plain `<form method="get">` around an `<input type="date">`.
- *
- * No JavaScript, on purpose — these pages are chrome-light and the controls they
- * replaced were plain links, so the picker degrades to a normal navigation the
- * same way. The visible submit button is the cost of that: a native date input
- * fires no navigation of its own when a rider taps a day in the calendar popup.
+ * The date picker: a plain `<form method="get">` around an `<input type="date">`,
+ * progressively enhanced to submit itself when a rider picks a day.
  *
  * A GET form replaces the query string wholesale with its own fields, which is
  * what makes the hidden-input list the *complete* definition of what survives a
@@ -470,6 +466,53 @@ function renderDayBanner(opts: {
  * reveals ride along; `service` deliberately does NOT, so picking a date drops a
  * pinned pattern visibly in the URL instead of leaving a param that outranks
  * nothing and explains less.
+ *
+ * ## Why the submit button is still in the markup
+ *
+ * A native date input fires no navigation of its own, so the button used to be
+ * the only thing that made this control work. The enhancement below removes it,
+ * which means the button's absence is now *evidence the script ran*. That's why
+ * it ships in the DOM and is hidden imperatively, rather than being wrapped in
+ * `<noscript>` or hidden by a stylesheet: those hide the button on a signal
+ * ("scripting is enabled", "the CSS loaded") that is merely *correlated* with
+ * the handler being attached. Anything that stops the script — a future
+ * `script-src` on these pages, a parse error, an extension — would then take
+ * the button away and leave nothing behind it. Hiding it on the last line of
+ * the script that installs the handler makes the two impossible to separate.
+ *
+ * Today's CSP permits it either way: embedHeaders() sets `frame-ancestors *`
+ * and no `script-src` at all (worker/embeds/layout.ts), and these pages already
+ * run inline script for the Mapbox map and the impression beacon.
+ *
+ * ## Why `change`, and why it still has to wait
+ *
+ * `change` is the committed-value event — it is what fires when a rider taps a
+ * day in the native calendar popup, in every browser that ships one. `input`
+ * fires on the same edits and offers nothing extra here.
+ *
+ * But `change` on a date input is *not* only fired on a completed date, which
+ * is the trap this control has to survive. Measured in Chrome 152: typing the
+ * year "2026" fires `change` four times, at `0002-`, `0020-`, `0202-` and
+ * finally `2026-`; and editing the month of an already-complete date fires it
+ * on the *first* digit, so a rider heading for December gets a `change` at
+ * January on the way. Submitting synchronously would navigate away mid-edit.
+ *
+ * Two guards, because the two cases fail differently:
+ *
+ * - The part-typed *year* values are all below `1000-01-01`, and the value is
+ *   always zero-padded `YYYY-MM-DD`, so a string compare against that floor
+ *   rejects every intermediate a 4-digit year can produce — and rejects `''`
+ *   (cleared, or `badInput` from unparseable typing) in the same comparison.
+ * - The part-typed *month* is a well-formed date, so no test of the value can
+ *   catch it. Only typing can produce it, so a keystroke defers the submit
+ *   until typing settles, while a pointer-driven pick submits immediately.
+ *   Tabbing away flushes the pending submit rather than dropping it.
+ *
+ * Nothing here bypasses the browser's own validation: `requestSubmit()` runs
+ * the same constraint check a click on the button would, so `min`/`max` still
+ * refuse an out-of-range date the same way. (`submit()` is the fallback for
+ * pre-16 Safari, which skips validation — the server's out-of-range message
+ * covers that path, as it already must for a hand-typed URL.)
  */
 const PICKER_CARRY_PARAMS = [
   'accent',
@@ -496,6 +539,38 @@ function renderDatePicker(
   // out-of-range message underneath has to exist regardless.
   const min = range ? html` min="${ymdToInputValue(range.start)}"` : '';
   const max = range ? html` max="${ymdToInputValue(range.end)}"` : '';
+  // The accessible name only promises the auto-update once the script that
+  // performs it has run, so a no-JS rider is never told about a behaviour their
+  // browser isn't getting. Static translator strings, JSON-encoded the same way
+  // the impression beacon encodes its path.
+  const autoLabel = JSON.stringify(`${t.showScheduleForDate}. ${t.dateAutoUpdates}`);
+  const enhance = `(function () {
+    var f = document.querySelector('form.date-picker');
+    if (!f) return;
+    var d = f.querySelector('input[type=date]');
+    if (!d) return;
+    var b = f.querySelector('button[type=submit]');
+    var initial = d.value, typing = false, timer;
+    function go() {
+      clearTimeout(timer);
+      // Unchanged means a blur that touched nothing — never reload the page
+      // just because a rider tabbed through the control.
+      if (d.value === initial) return;
+      // '' and the 1-3 digit years emitted mid-typing all sort below the floor.
+      if (d.value < '1000-01-01') return;
+      if (f.requestSubmit) f.requestSubmit(); else f.submit();
+    }
+    d.addEventListener('pointerdown', function () { typing = false; });
+    d.addEventListener('keydown', function () { typing = true; });
+    d.addEventListener('change', function () {
+      clearTimeout(timer);
+      if (typing) timer = setTimeout(go, 500); else go();
+    });
+    d.addEventListener('blur', function () { clearTimeout(timer); go(); });
+    d.setAttribute('aria-label', ${autoLabel});
+    // Last, and only here: see the note above on why this is the same script.
+    if (b) b.hidden = true;
+  })();`;
   return html`
     <form class="date-picker" method="get">
       ${hidden}
@@ -507,6 +582,9 @@ function renderDatePicker(
       />
       <button type="submit">${t.go}</button>
     </form>
+    <script>
+      ${raw(enhance)}
+    </script>
   `;
 }
 
