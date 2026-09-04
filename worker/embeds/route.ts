@@ -119,16 +119,38 @@ export async function renderRouteEmbed(
   const profiles = buildServiceProfiles(feed.state.calendars);
   // Judged against the *selected* date, not today: a rider looking up a date
   // last spring should see the pattern that ran then, not be told it's over.
+  // Computed over ALL profiles, because an explicit `?service=` can select one
+  // this route doesn't run and still needs its "ended" notice.
   const expired = expiredProfileIds(profiles, feed.state.calendarDates, selectedDate);
-  // Hiding is for feeds that still have something to show. When *every* pattern
-  // has ended, hiding them all would leave a rider on an empty page with no
-  // explanation — so show them, and let the warning do the work.
-  const allExpired = profiles.length > 0 && expired.size === profiles.length;
+
+  // ─── Only patterns THIS route actually operates ───────────────────────────
+  //
+  // `buildServiceProfiles` reads the whole feed, but this page is one route's.
+  // Selecting across all of them picks by what the *network* runs: on a feed
+  // with an all-week service and a weekend-only one, a Saturday resolves to
+  // "Daily" — and a route that only runs the weekend pattern renders an empty
+  // table under a banner announcing a schedule is in effect.
+  //
+  // That was true before the date picker existed (the tie-break has always been
+  // feed-wide), but the tab row let a rider click their way out of it. With the
+  // tabs off the page it became a dead end, so the scoping belongs here now.
+  // Same trap `servicePinApplies` already guards the snippet builder against.
+  const routeServiceIds = new Set<string>();
+  for (const trip of feed.state.trips) {
+    if (trip.route_id === routeId) routeServiceIds.add(trip.service_id);
+  }
+  const routeProfiles = profiles.filter((p) => p.serviceIds.some((id) => routeServiceIds.has(id)));
+
+  // Hiding is for routes that still have something to show. When *every*
+  // pattern this route runs has ended, hiding them all would leave a rider on
+  // an empty page with no explanation — so show them, and let the warning work.
+  const allExpired =
+    routeProfiles.length > 0 && routeProfiles.every((p) => expired.has(p.id));
   const showExpired = showExpiredParam || allExpired;
 
-  const defaultProfile = pickDefaultProfile(profiles, activeOnDate, expired);
+  const defaultProfile = pickDefaultProfile(routeProfiles, activeOnDate, expired);
 
-  let selected: ServiceProfile | null = null;
+  let pinned: ServiceProfile | null = null;
   // Precedence: an explicit `?date=` outranks an explicit `?service=`.
   //
   // The pin is where the page *starts* — an agency bakes it into an iframe — and
@@ -142,31 +164,25 @@ export async function renderRouteEmbed(
   // profiles, expired included, because showing what it actually points at —
   // with the notice on it — beats silently substituting a different schedule.
   if (requestedTab && !requestedDate) {
-    selected = profiles.find((p) => p.id === requestedTab) ?? null;
+    pinned = profiles.find((p) => p.id === requestedTab) ?? null;
   }
-  if (!selected) selected = defaultProfile;
+  const selected: ServiceProfile | null = pinned ?? defaultProfile;
 
-  // Does *this route* run on the selected date? Feed-wide service isn't enough:
-  // a route can sit idle on a day the rest of the network is running, and the
-  // rider asked about this route.
-  const routeServiceIds = new Set<string>();
-  for (const trip of feed.state.trips) {
-    if (trip.route_id === routeId) routeServiceIds.add(trip.service_id);
-  }
-  let routeRunsOnDate = false;
+  // This route's services actually running on the selected date. Feed-wide
+  // service isn't enough: a route can sit idle on a day the rest of the network
+  // is running, and the rider asked about this route.
+  const runningOnDate = new Set<string>();
   for (const id of activeOnDate) {
-    if (routeServiceIds.has(id)) {
-      routeRunsOnDate = true;
-      break;
-    }
+    if (routeServiceIds.has(id)) runningOnDate.add(id);
   }
+  const routeRunsOnDate = runningOnDate.size > 0;
 
   // The no-service explanation is for a date the rider *asked* for. With no
-  // date param the page keeps its previous behaviour exactly — banner says "no
-  // service today", the fallback pattern's timetable renders underneath as
-  // context — because a cold load is us guessing, not the rider asking. (This
-  // is the one place the two paths diverge; unifying them is a one-line change
-  // if that context turns out not to be worth the mixed message.)
+  // date param the page keeps its previous behaviour — banner says "no service
+  // today", the fallback pattern's timetable renders underneath as context —
+  // because a cold load is us guessing, not the rider asking. That fallback is
+  // now drawn from this route's own patterns, so it's a timetable the route
+  // actually runs rather than whatever the network runs most.
   const explainNoService = requestedDate !== null && !routeRunsOnDate;
   const range = feedCalendarRange(feed.state.calendars, feed.state.calendarDates);
   const outOfRange = !!range && (selectedDate < range.start || selectedDate > range.end);
@@ -174,13 +190,25 @@ export async function renderRouteEmbed(
   const mapData = buildRouteMapData(route, feed.state, slug);
   const map = renderMap(mapData, env.MAPBOX_TOKEN);
 
-  // Tabs a rider can reach: the live patterns, the expired ones when asked for
-  // (or when that's all there is), and whatever is selected — a selected tab
-  // missing from its own tab row reads as a broken page.
+  // Tabs a rider can reach: this route's live patterns, the expired ones when
+  // asked for (or when that's all there is), and whatever is selected — a
+  // selected tab missing from its own tab row reads as a broken page, and that
+  // exception is also what keeps a `?service=` pin at another route's pattern
+  // visible.
+  //
+  // Scoped to `routeProfiles` for the same reason the selection is: a tab for a
+  // pattern this route doesn't operate is a link to an empty table.
+  const sel = selected;
   const visibleProfiles = showTabs
-    ? profiles.filter((p) => showExpired || !expired.has(p.id) || p.id === selected?.id)
+    ? routeProfiles
+        .filter((p) => showExpired || !expired.has(p.id) || p.id === sel?.id)
+        .concat(sel && !routeProfiles.some((p) => p.id === sel.id) ? [sel] : [])
     : [];
-  const hiddenCount = showTabs ? profiles.length - visibleProfiles.length : 0;
+  // Only this route's own withheld patterns count as "hidden" — a pattern the
+  // route never ran wasn't hidden from the rider, it was never theirs to see.
+  const hiddenCount = showTabs
+    ? routeProfiles.filter((p) => !visibleProfiles.some((v) => v.id === p.id)).length
+    : 0;
 
   const tabs = visibleProfiles.map((p) => {
     const active = selected && p.id === selected.id;
@@ -209,6 +237,23 @@ export async function renderRouteEmbed(
 
   // What goes where the timetable would: the requested date's answer when the
   // rider named a date this route doesn't run, otherwise the timetable.
+  // Which services the timetable is built from, in priority order:
+  //
+  //  1. An explicit `?service=` pin — exactly that pattern and nothing else.
+  //     Someone has the URL in a live page and is owed what they asked for.
+  //  2. Everything this route runs on the selected date. A day is not a
+  //     pattern: where two patterns overlap — a seasonal weekend service
+  //     running alongside a year-round one — both are real trips a rider can
+  //     board, and picking only the one that sorts first made the other
+  //     unreachable by any date once the tab row came off the page.
+  //  3. Nothing running: fall back to the selected profile so a cold page still
+  //     shows what this route runs when it does run, as it did before.
+  const scheduleServiceIds = pinned
+    ? new Set(pinned.serviceIds)
+    : runningOnDate.size > 0
+      ? runningOnDate
+      : new Set(selected?.serviceIds ?? []);
+
   const schedule = explainNoService
     ? renderNoServiceForDate({
         url,
@@ -223,7 +268,7 @@ export async function renderRouteEmbed(
         t,
       })
     : selected
-      ? renderScheduleTables(route, new Set(selected.serviceIds), feed.state)
+      ? renderScheduleTables(route, scheduleServiceIds, feed.state)
       : html`<p class="empty">${t.noServicePatterns}</p>`;
 
   // Day banner — always shown so the rider knows what schedule is in force, and
@@ -236,7 +281,10 @@ export async function renderRouteEmbed(
     isToday,
     dayOfWeek: dow,
     profile: defaultProfile,
-    noService: requestedDate !== null ? !routeRunsOnDate : activeOnDate.size === 0,
+    // Route-scoped on both paths. Feed-wide, this said "Daily schedule in
+    // effect" on a route that runs nothing that day — the banner asserting a
+    // schedule while the table below it came back empty.
+    noService: !routeRunsOnDate,
     picker: renderDatePicker(url, selectedDate, range, t),
     lang,
     t,

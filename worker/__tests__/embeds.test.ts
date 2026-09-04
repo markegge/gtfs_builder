@@ -183,6 +183,25 @@ function dowOf(ymd: string): number {
   ).getUTCDay();
 }
 
+/** YYYYMMDD `n` days from `ymd`. */
+function plusDays(ymd: string, n: number): string {
+  const d = new Date(
+    Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)) + n * 86_400_000,
+  );
+  return (
+    `${d.getUTCFullYear()}` +
+    `${String(d.getUTCMonth() + 1).padStart(2, '0')}` +
+    `${String(d.getUTCDate()).padStart(2, '0')}`
+  );
+}
+
+/** First date on or after `ymd` falling on a weekend. */
+function weekendOnOrAfter(ymd: string): string {
+  let cursor = ymd;
+  while (dowOf(cursor) !== 0 && dowOf(cursor) !== 6) cursor = plusDays(cursor, 1);
+  return cursor;
+}
+
 /**
  * The next date on or after today falling on weekday `dow` (0 = Sunday).
  *
@@ -302,6 +321,50 @@ function makeDatePickerState(): SnapshotState {
     calendars: base.calendars.map((c) => ({ ...c, start_date: start, end_date: end })),
   };
 }
+
+/**
+ * Two routes with different service patterns — the shape that broke on
+ * `gorge-valley-transit`, where GVT3 runs only the weekend patterns.
+ *
+ * R1 runs an all-week DAILY service; R2 runs a weekend-only one and nothing
+ * else. On a Saturday BOTH are active feed-wide, and DAILY sorts ahead of
+ * Weekend, so a profile picker that looks at the feed rather than the route
+ * hands R2 a pattern it has no trips on: an empty page under a banner
+ * announcing "Daily schedule in effect", with no way for the rider to reach
+ * the schedule that does exist.
+ */
+function makeRouteScopedState(): SnapshotState {
+  const base = makeFeedState();
+  const start = ymdFromNow(-30);
+  const end = ymdFromNow(300);
+  return {
+    ...base,
+    feedInfo: { feed_publisher_name: 'EmbedAgency', feed_start_date: start, feed_end_date: end },
+    routes: [
+      ...base.routes,
+      { route_id: 'R2', agency_id: 'a1', route_short_name: '2', route_long_name: 'Lakeside', route_type: 3, route_color: '2980b9', route_text_color: 'ffffff' },
+    ],
+    calendars: [
+      { service_id: 'DAILY', monday: 1, tuesday: 1, wednesday: 1, thursday: 1, friday: 1, saturday: 1, sunday: 1, start_date: start, end_date: end },
+      { service_id: 'WKND', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 0, saturday: 1, sunday: 1, start_date: start, end_date: end },
+    ],
+    calendarDates: [],
+    trips: [
+      { trip_id: 'd1', route_id: 'R1', service_id: 'DAILY', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+      { trip_id: 'k1', route_id: 'R2', service_id: 'WKND', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Lakeside' },
+    ],
+    stopTimes: [
+      { trip_id: 'd1', arrival_time: '07:07:00', departure_time: '07:07:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'd1', arrival_time: '07:17:00', departure_time: '07:17:00', stop_id: 's2', stop_sequence: 2 },
+      { trip_id: 'k1', arrival_time: '14:44:00', departure_time: '14:44:00', stop_id: 's1', stop_sequence: 1 },
+      { trip_id: 'k1', arrival_time: '14:54:00', departure_time: '14:54:00', stop_id: 's2', stop_sequence: 2 },
+    ],
+  };
+}
+
+/** Departure times unique to each route in the fixture above. */
+const R1_DAILY_TIME = '7:07a';
+const R2_WEEKEND_TIME = '2:44p';
 
 async function createPublishedProject(
   client: TestClient,
@@ -930,6 +993,148 @@ describe('embed routes', () => {
       });
       expect(cross.status).toBe(200);
       expect(await cross.text()).toContain(WEEKDAY_ONLY_TIME);
+    });
+
+    // ─── Route-scoped profile selection ──────────────────────────────────────
+    //
+    // Regression: the date resolved to a profile by looking at the whole feed,
+    // so on `gorge-valley-transit` a Saturday on GVT3 — which runs only the
+    // weekend patterns — landed on "Daily", a pattern that route has no trips
+    // on. The rider got an empty page under a banner announcing a schedule was
+    // in effect, and with the tab row hidden there was no way to reach the
+    // timetable that did exist.
+    //
+    // The selection bug predates the picker (pickDefaultProfile was always
+    // feed-wide), but hiding the tabs turned a recoverable annoyance into a
+    // dead end, so it belongs to this change.
+    async function routeScopedProject(email: string, name: string) {
+      const client = await loggedInClient(email);
+      return createPublishedProject(client, name, makeRouteScopedState());
+    }
+
+    it('picks a pattern THIS route runs, not the feed’s most popular one', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-sat@example.com', 'EmbedDpRsSat');
+
+      // Saturday: DAILY and WKND are both active feed-wide, and DAILY sorts
+      // first. R2 runs only WKND, so a feed-wide pick renders nothing here.
+      const html = await get(
+        `http://feeds.example.com/${slug}/embed/route/R2?date=${ymdToInput(nextDow(6))}`,
+      );
+      expect(html).toContain(R2_WEEKEND_TIME);
+      // The banner must not announce a pattern this route doesn't operate.
+      expect(html).not.toContain('Daily schedule in effect');
+      // And it's a real timetable, not the empty-schedule placeholder.
+      expect(html).toContain('table class="schedule"');
+      expect(html).not.toContain('No trips scheduled');
+    });
+
+    it('explains a weekday on a weekend-only route instead of rendering nothing', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-wed@example.com', 'EmbedDpRsWed');
+
+      // The network runs (DAILY is active) but R2 doesn't. This is the case the
+      // explanation exists for, and it has to beat "empty table, no notice".
+      const html = await get(
+        `http://feeds.example.com/${slug}/embed/route/R2?date=${ymdToInput(nextDow(3))}`,
+      );
+      expect(html).toContain('No service on this date');
+      expect(html).toContain('Next service');
+      // The next weekend day after that Wednesday — NOT simply the next
+      // Saturday from today, which can fall before it.
+      expect(html).toContain(`date=${ymdToInput(weekendOnOrAfter(nextDow(3)))}`);
+      expect(html).not.toContain('table class="schedule"');
+      expect(html).not.toContain('Daily schedule in effect');
+    });
+
+    it('scopes the no-date default page to the route too', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-def@example.com', 'EmbedDpRsDef');
+
+      // Same bug, reachable with no date param at all: on a Saturday the cold
+      // page for R2 picked DAILY. Asserted for whichever day the suite runs, so
+      // this can't pass by landing on a convenient weekday.
+      const html = await get(`http://feeds.example.com/${slug}/embed/route/R2`);
+      expect(html).not.toContain('Daily schedule in effect');
+      const weekend = dowOf(ymdFromNow(0)) === 0 || dowOf(ymdFromNow(0)) === 6;
+      if (weekend) expect(html).toContain(R2_WEEKEND_TIME);
+      else expect(html).toContain('No service today');
+    });
+
+    it('scopes the revealed tab row to the route’s own patterns', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-tabs@example.com', 'EmbedDpRsTabs');
+
+      // A tab for a pattern the route doesn't run is a link to an empty table —
+      // the same trap servicePinApplies() already guards the snippet against.
+      const html = await get(`http://feeds.example.com/${slug}/embed/route/R2?show_services=1`);
+      expect(html).not.toContain('>Daily</a>');
+
+      // R1's page is the mirror image, which is what proves the filter is
+      // per-route rather than just dropping the first profile.
+      const r1 = await get(`http://feeds.example.com/${slug}/embed/route/R1?show_services=1`);
+      expect(r1).not.toContain('>Weekend</a>');
+      expect(r1).toContain(R1_DAILY_TIME);
+    });
+
+    it('shows every pattern running on the date, not just the one that sorts first', async () => {
+      const client = await loggedInClient('emb-dp-overlap@example.com');
+      // Two weekend patterns with overlapping windows — the `gorge-valley-transit`
+      // shape, where GVT3 runs both a May 9–Dec 27 weekend service and a
+      // May 9–Jun 7 one. Inside the overlap BOTH run, but the profile tie-break
+      // returns exactly one, so the shorter pattern's trips were unreachable by
+      // any date at all once the tab row came off the page.
+      const start = ymdFromNow(-30);
+      const shortEnd = ymdFromNow(20);
+      const longEnd = ymdFromNow(300);
+      const state: SnapshotState = {
+        ...makeFeedState(),
+        feedInfo: { feed_publisher_name: 'EmbedAgency', feed_start_date: start, feed_end_date: longEnd },
+        calendars: [
+          { service_id: 'WKNDLONG', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 0, saturday: 1, sunday: 1, start_date: start, end_date: longEnd },
+          { service_id: 'WKNDSHORT', monday: 0, tuesday: 0, wednesday: 0, thursday: 0, friday: 0, saturday: 1, sunday: 1, start_date: start, end_date: shortEnd },
+        ],
+        calendarDates: [],
+        trips: [
+          { trip_id: 'wl1', route_id: 'R1', service_id: 'WKNDLONG', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+          { trip_id: 'ws1', route_id: 'R1', service_id: 'WKNDSHORT', direction_id: 0, shape_id: 'sh1', trip_headsign: 'Downtown' },
+        ],
+        stopTimes: [
+          { trip_id: 'wl1', arrival_time: '08:08:00', departure_time: '08:08:00', stop_id: 's1', stop_sequence: 1 },
+          { trip_id: 'ws1', arrival_time: '16:16:00', departure_time: '16:16:00', stop_id: 's1', stop_sequence: 1 },
+        ],
+      };
+      const { slug } = await createPublishedProject(client, 'EmbedDpOverlap', state);
+
+      // A weekend date inside the overlap: both patterns run, so both belong on
+      // the page. This is what makes "a June date and a September date show
+      // different schedules" true rather than coincidence.
+      const inOverlap = weekendOnOrAfter(ymdFromNow(1));
+      const both = await get(
+        `http://feeds.example.com/${slug}/embed/route/R1?date=${ymdToInput(inOverlap)}`,
+      );
+      expect(both).toContain('8:08a');
+      expect(both).toContain('4:16p');
+
+      // A weekend date after the short pattern ended: only the long one runs.
+      const afterShort = weekendOnOrAfter(ymdFromNow(60));
+      const one = await get(
+        `http://feeds.example.com/${slug}/embed/route/R1?date=${ymdToInput(afterShort)}`,
+      );
+      expect(one).toContain('8:08a');
+      expect(one).not.toContain('4:16p');
+    });
+
+    it('still honours a ?service= pin at a pattern the route does not run', async () => {
+      const { slug } = await routeScopedProject('emb-dp-rs-pin@example.com', 'EmbedDpRsPin');
+
+      // Route-scoping the *automatic* pick must not start overriding an
+      // explicit pin — an agency with this URL in a live page is owed what it
+      // asked for, empty or not, rather than a silent substitution.
+      const profiles = await serviceProfiles(slug);
+      const daily = profiles.find((p) => p.label === 'Daily');
+      expect(daily).toBeTruthy();
+      const html = await get(
+        `http://feeds.example.com/${slug}/embed/route/R2?service=${encodeURIComponent(daily!.id)}`,
+      );
+      expect(html).not.toContain(R2_WEEKEND_TIME);
+      expect(html).toContain('No trips scheduled');
     });
 
     it('localizes the picker and the no-service answer (es)', async () => {
