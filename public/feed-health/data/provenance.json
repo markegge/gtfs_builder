@@ -1,8 +1,8 @@
 {
   "ref": "main",
-  "sha": "1242baae44f053f50336c54d5bdd037811a77ff5",
+  "sha": "b12393ce7c019f7988bb733567251237e596f359",
   "schema_version": "1.1.0",
-  "generated_at": "2026-07-31T18:36:17Z",
+  "generated_at": "2026-08-05T08:36:26Z",
   "source_repo": "GTFS-X/gtfs-feed-health",
-  "published_at": "2026-08-05T06:51:17Z"
+  "published_at": "2026-09-05T09:40:44Z"
 }
